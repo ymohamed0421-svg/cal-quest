@@ -17,6 +17,11 @@
       settings: { reminders: DEFAULT_REMINDERS.slice(), usdaKey: "", geminiKey: "" },
       celebrated: {},
       lastLevel: 1,
+      meals: [],      // saved meals: {id, name, items:[{name, amountLabel, n}]}
+      favs: [],       // favorite foods: {id, name, amountLabel, n}
+      weights: {},    // dayKey -> kg
+      badges: {},     // badge id -> unlocked time
+      penaltySince: null,
     };
   }
   function load() {
@@ -30,6 +35,8 @@
     return fresh();
   }
   let S = load();
+  if (!S.penaltySince) { S.penaltySince = dayKey0(); }
+  function dayKey0() { const d = new Date(); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); }
   function save() {
     try { localStorage.setItem(STORE_KEY, JSON.stringify(S)); }
     catch (e) { toast("Could not save", "Your phone storage may be full."); }
@@ -162,7 +169,106 @@
     return { q: out, overall, cleared, xp, doneMain, mainCount: main.length };
   }
 
-  function totalXP() { return Object.keys(S.days).reduce((a, k) => a + questState(k).xp, 0); }
+  function totalXP() {
+    const keys = Object.keys(S.days);
+    let xp = keys.reduce((a, k) => { const pen = penaltyState(k); return a + questState(k).xp + (pen ? pen.xp : 0); }, 0);
+    const weeks = new Set(keys.map(weekStart));
+    weeks.forEach((w) => (xp += bossState(w).xp));
+    return Math.max(0, xp);
+  }
+
+  // ---- Penalty quest: if yesterday's daily quest wasn't cleared, today you must make up for it.
+  const PENALTY_XP = 150, REDEEM_XP = 50;
+  function penaltyState(k) {
+    const prev = addDays(k, -1);
+    const first = Object.keys(S.days).sort()[0];
+    if (!S.penaltySince || prev < S.penaltySince || !first || prev < first) return null;
+    if (questState(prev).cleared) return null;
+    const d = peekDay(k), t = d.t || S.targets;
+    const wGoal = t.water + 1, sGoal = t.steps + 2000;
+    const water = (d.water || 0) >= wGoal, steps = (d.steps || 0) >= sGoal;
+    const done = water && steps, past = k < dayKey();
+    return { water, steps, wGoal, sGoal, done, past, have: d, xp: done ? REDEEM_XP : past ? -PENALTY_XP : 0 };
+  }
+
+  // ---- Weekly boss battle: every cleared % of a day hits the boss.
+  const BOSSES = [
+    ["Sugar Golem", "🍬"], ["Couch Wraith", "🛋️"], ["Sodium Serpent", "🧂"], ["Midnight Snacker", "🌙"],
+    ["Dehydration Djinn", "🏜️"], ["Takeout Titan", "🥡"], ["Procrasti-Hydra", "🐉"], ["Soda Specter", "🥤"],
+  ];
+  const BOSS_HP = 600, BOSS_XP = 1000;
+  function weekStart(k) { const d = keyToDate(k); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return dayKey(d); }
+  function bossState(ws) {
+    const wk = Math.floor(keyToDate(ws).getTime() / (7 * 864e5));
+    const [name, icon] = BOSSES[((wk % BOSSES.length) + BOSSES.length) % BOSSES.length];
+    let dmg = 0; const hits = [];
+    for (let i = 0; i < 7; i++) {
+      const k = addDays(ws, i);
+      let hit = 0;
+      if (S.days[k]) { const qs = questState(k); hit = Math.round(qs.overall * 100) + (qs.cleared ? 50 : 0); }
+      hits.push(hit); dmg += hit;
+    }
+    const defeated = dmg >= BOSS_HP;
+    return { name, icon, hp: BOSS_HP, dmg: Math.min(dmg, BOSS_HP), hits, defeated, xp: defeated ? BOSS_XP : 0, end: addDays(ws, 6) };
+  }
+
+  // ---- Badges (each one also unlocks a title)
+  function bestStreak() {
+    const keys = Object.keys(S.days).sort(); let best = 0, run = 0, prev = null;
+    keys.forEach((k) => { if (questState(k).cleared) { run = prev && addDays(prev, 1) === k ? run + 1 : 1; prev = k; best = Math.max(best, run); } else { run = 0; prev = null; } });
+    return best;
+  }
+  function gameStats() {
+    const keys = Object.keys(S.days);
+    const st = { foods: 0, photo: 0, barcode: 0, waterDays: 0, proteinDays: 0, redeemed: 0, bosses: 0, perfectWeek: false };
+    keys.forEach((k) => {
+      const d = S.days[k], qs = questState(k);
+      st.foods += d.foods.length;
+      d.foods.forEach((f) => { if (f.src === "photo") st.photo++; if (f.src === "barcode") st.barcode++; });
+      if (qs.q.water.state === "done") st.waterDays++;
+      if (qs.q.protein.state === "done") st.proteinDays++;
+      const pen = penaltyState(k); if (pen && pen.done) st.redeemed++;
+    });
+    new Set(keys.map(weekStart)).forEach((w) => {
+      if (bossState(w).defeated) st.bosses++;
+      let all = true; for (let i = 0; i < 7; i++) { const k = addDays(w, i); if (!S.days[k] || !questState(k).cleared) all = false; }
+      if (all) st.perfectWeek = true;
+    });
+    st.best = bestStreak(); st.level = levelFromXP(totalXP()); st.weighIns = Object.keys(S.weights || {}).length; st.meals = (S.meals || []).length;
+    return st;
+  }
+  const BADGES = [
+    ["first", "🍽️", "First Bite", "Log your first food", (s) => s.foods >= 1],
+    ["hydrated", "💧", "Hydrated", "Hit your water goal", (s) => s.waterDays >= 1],
+    ["protein7", "🥩", "Protein Pro", "Hit protein on 7 days", (s) => s.proteinDays >= 7],
+    ["streak3", "🔥", "On Fire", "3-day quest streak", (s) => s.best >= 3],
+    ["streak7", "⚡", "Unstoppable", "7-day quest streak", (s) => s.best >= 7],
+    ["streak30", "👑", "Living Legend", "30-day quest streak", (s) => s.best >= 30],
+    ["boss1", "⚔️", "Boss Slayer", "Defeat a weekly boss", (s) => s.bosses >= 1],
+    ["boss4", "🐲", "Monster Hunter", "Defeat 4 weekly bosses", (s) => s.bosses >= 4],
+    ["perfect", "🌟", "Flawless", "Clear all 7 quests in a week", (s) => s.perfectWeek],
+    ["photo10", "📸", "Food Paparazzi", "Log 10 foods by photo", (s) => s.photo >= 10],
+    ["barcode", "▦", "Scanner", "Log a food by barcode", (s) => s.barcode >= 1],
+    ["chef", "🍱", "Meal Prepper", "Save a meal", (s) => s.meals >= 1],
+    ["weigh7", "⚖️", "Scale Warrior", "Log your weight 7 times", (s) => s.weighIns >= 7],
+    ["redeem", "🛡️", "Redeemed", "Complete a penalty quest", (s) => s.redeemed >= 1],
+    ["lvl5", "🌀", "Rising Star", "Reach level 5", (s) => s.level >= 5],
+    ["lvl10", "💠", "Veteran", "Reach level 10", (s) => s.level >= 10],
+  ];
+  function availableTitles(L) {
+    const t = TITLES.filter(([lv]) => L >= lv).map(([, n]) => n);
+    BADGES.forEach(([id, , name]) => { if (S.badges[id]) t.push(name); });
+    return t;
+  }
+  function currentTitle(L) { const want = S.settings.title; return want && availableTitles(L).includes(want) ? want : titleFor(L); }
+
+  // ---- Themes, unlocked by level (or a badge)
+  const THEMES = [
+    ["azure", "Azure", 1, "#34c8ff"], ["emerald", "Emerald", 3, "#2fffa8"], ["crimson", "Crimson", 5, "#ff4d6d"],
+    ["violet", "Violet", 8, "#b07cff"], ["gold", "Gold", 12, "#ffc94d"], ["shadow", "Shadow", "boss1", "#e6edf5"],
+  ];
+  function themeUnlocked(th, L) { return typeof th[2] === "number" ? L >= th[2] : !!S.badges[th[2]]; }
+  function applyTheme() { document.documentElement.dataset.theme = S.settings.theme || "azure"; }
   // Level L starts at 250 * L*(L-1)/2 XP  → L2 at 250, L3 at 750, L4 at 1500 …
   function levelFromXP(xp) { let L = 1; while (250 * ((L + 1) * L) / 2 <= xp) L++; return L; }
   function levelStart(L) { return (250 * (L * (L - 1))) / 2; }
@@ -210,6 +316,7 @@
     quest: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2l3 6 6 1-4.5 4.5 1 6.5L12 17l-5.5 3 1-6.5L3 9l6-1z"/></svg>',
     food: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M7 2v9M4 2v5a3 3 0 006 0V2M7 11v11M17 2c-2 0-3 3-3 7s1 5 3 5v8"/></svg>',
     water: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2.5S5 10 5 14.5a7 7 0 0014 0C19 10 12 2.5 12 2.5z"/></svg>',
+    stats: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
     player: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="8" r="4"/><path d="M4 21c1-4 4-6 8-6s7 2 8 6"/></svg>',
   };
   function bottleSVG(fill) { // fill 0..1
@@ -224,6 +331,7 @@
   let foodDay = dayKey();
 
   function render() {
+    applyTheme();
     if (!S.profile || !S.targets) return renderOnboarding();
     const xp = totalXP(), L = levelFromXP(xp), start = levelStart(L), next = levelStart(L + 1);
     const st = streak();
@@ -232,19 +340,20 @@
       '<div class="shell">' +
       '<header class="hud">' +
       '<div class="lvl"><div class="num">' + L + '</div><div class="lab">LEVEL</div></div>' +
-      '<div class="hud-right"><div class="title-row"><div class="ptitle">' + esc(S.profile.name || "Player") + ' · Title: <b>' + esc(titleFor(L)) + '</b></div>' +
+      '<div class="hud-right"><div class="title-row"><div class="ptitle">' + esc(S.profile.name || "Player") + ' · Title: <b>' + esc(currentTitle(L)) + '</b></div>' +
       '<div class="streak" title="Days in a row with every quest cleared">' + (st ? "🔥 " + st + "-day streak" : "") + '</div></div>' +
       '<div class="xpbar"><i style="width:' + clamp(((xp - start) / (next - start)) * 100, 0, 100) + '%"></i></div>' +
       '<div class="xptext"><span>XP ' + fmt(xp - start) + " / " + fmt(next - start) + '</span><span>Total ' + fmt(xp) + ' XP</span></div></div>' +
       '</header><main id="view"></main></div>' +
       '<nav class="nav">' +
-      ["quest", "food", "water", "player"].map((t) => '<button data-tab="' + t + '" class="' + (tab === t ? "active" : "") + '">' + ICON[t] + (t === "quest" ? "Quest" : t === "food" ? "Food" : t === "water" ? "Water" : "Player") + "</button>").join("") +
+      ["quest", "food", "water", "stats", "player"].map((t) => '<button data-tab="' + t + '" class="' + (tab === t ? "active" : "") + '">' + ICON[t] + t.charAt(0).toUpperCase() + t.slice(1) + "</button>").join("") +
       "</nav>";
     $$(".nav button").forEach((b) => b.addEventListener("click", () => { tab = b.dataset.tab; if (tab === "food") foodDay = dayKey(); render(); window.scrollTo(0, 0); }));
     const v = $("#view");
     if (tab === "quest") renderQuest(v);
     else if (tab === "food") renderFood(v);
     else if (tab === "water") renderWater(v);
+    else if (tab === "stats") renderStats(v);
     else renderPlayer(v);
     checkCelebrations(L);
   }
@@ -279,6 +388,7 @@
       '<p class="reward">Reward : ' + FULL_REWARD + ' XP</p>' +
       '<div class="qfoot"><button class="btn sm" data-go="food">+ Food</button><div class="timer" id="timer">--:--:--<small>TIME LEFT</small></div><button class="btn sm" data-go="water">+ Water</button></div>' +
       "</section>" +
+      penaltyHTML(k) + bossHTML(weekStart(k), true) +
       '<div class="quick"><button class="btn" id="qb-bottle">+1 Bottle</button><button class="btn" id="qb-food">Log food</button><button class="btn" id="qb-steps">Steps</button></div>';
     $$(".qrow", v).forEach((b) => b.addEventListener("click", () => {
       const id = b.dataset.q;
@@ -291,6 +401,25 @@
     $("#qb-food").addEventListener("click", () => openAddFood());
     $("#qb-steps").addEventListener("click", openStepsModal);
     tickTimer();
+  }
+  function penaltyHTML(k) {
+    const pen = penaltyState(k); if (!pen) return "";
+    const row = (name, have, goal, ok) => '<li class="' + (ok ? "done" : "") + '"><div class="qrow" style="cursor:default"><span class="qname">-' + name + '</span><span class="qval">[' + fmt(have) + "/" + fmt(goal) + ']</span><span class="badge">' + (ok ? "✓" : "!") + '</span></div><div class="qbar"><i style="width:' + clamp((have / goal) * 100, 0, 100) + '%"></i></div></li>';
+    return '<section class="panel penalty">' + corners() + '<h2 class="panel-title" style="font-size:22px">⚠ Penalty Quest</h2>' +
+      '<p class="panel-sub">Yesterday\'s quest was left unfinished. Make up for it today.</p><ul class="quest" style="margin-top:10px">' +
+      row("Extra water", r1(pen.have.water || 0), pen.wGoal, pen.water) + row("Extra steps", pen.have.steps || 0, pen.sGoal, pen.steps) + "</ul>" +
+      '<p class="caution">' + (pen.done ? '<span style="color:var(--good)">Penalty cleared! +' + REDEEM_XP + " XP</span>" : "<b>Fail:</b> −" + PENALTY_XP + " XP at midnight · <b style=\"color:var(--good)\">Clear:</b> +" + REDEEM_XP + " XP") + "</p></section>";
+  }
+  function bossHTML(ws, compact) {
+    const b = bossState(ws), left = Math.max(0, b.hp - b.dmg);
+    const daysLeft = Math.max(0, Math.round((keyToDate(b.end) - keyToDate(dayKey())) / 864e5) + 1);
+    return '<section class="panel boss">' + corners() +
+      '<div style="display:flex;align-items:center;gap:12px"><div class="boss-ic">' + b.icon + '</div><div style="flex:1"><div class="h2" style="margin:0">Weekly boss</div>' +
+      '<div class="boss-name">' + esc(b.name) + (b.defeated ? ' <span style="color:var(--good)">DEFEATED</span>' : "") + "</div></div></div>" +
+      '<div class="hpbar"><i style="width:' + ((left / b.hp) * 100) + '%"></i></div>' +
+      '<div class="xptext"><span>HP ' + fmt(left) + " / " + fmt(b.hp) + "</span><span>" + (b.defeated ? "+" + BOSS_XP + " XP earned" : daysLeft + " day" + (daysLeft === 1 ? "" : "s") + " left · reward " + BOSS_XP + " XP") + "</span></div>" +
+      (compact ? "" : '<div class="hits">' + b.hits.map((h, i) => '<div><b>' + (h ? h : "–") + "</b><span>" + "MTWTFSS"[i] + "</span></div>").join("") + "</div>") +
+      '<p class="note" style="margin-top:8px">Every % of your daily quest hits the boss. Clearing a day adds a 50-damage critical hit.</p></section>';
   }
   function tickTimer() {
     const el = $("#timer"); if (!el) return;
@@ -325,14 +454,27 @@
       S.lastLevel = L; changed = true;
       setTimeout(() => {
         const bg = openModal('<div class="levelup"><h2 class="panel-title">Level Up!</h2><div class="big">' + L + '</div>' +
-          '<p class="panel-sub">New title: ' + esc(titleFor(L)) + '</p><p class="explain" style="text-align:center">Keep stacking daily quests to level up faster.</p>' +
+          '<p class="panel-sub">New title: ' + esc(titleFor(L)) + '</p>' + (THEMES.find((th) => th[2] === L) ? '<p class="explain" style="text-align:center">🎨 New theme unlocked: <b>' + THEMES.find((th) => th[2] === L)[1] + "</b> (Player tab)</p>" : "") + '<p class="explain" style="text-align:center">Keep stacking daily quests to level up faster.</p>' +
           '<button class="btn primary block" data-close>Continue</button></div>', { center: true });
         bg.querySelector(".panel").classList.add("levelup");
       }, 900);
     } else if (L < (S.lastLevel || 1)) { S.lastLevel = L; changed = true; }
+    // new badges
+    const st = gameStats();
+    BADGES.forEach(([id, icon, name, , test]) => {
+      if (!S.badges[id] && test(st)) {
+        S.badges[id] = Date.now(); changed = true;
+        setTimeout(() => toast("🏅 Badge unlocked: " + name, "New title available in Player", "good"), 1200);
+      }
+    });
+    const bs = bossState(weekStart(k));
+    if (bs.defeated && !S.celebrated[k + ":boss"] && !S.celebrated["boss:" + weekStart(k)]) {
+      S.celebrated["boss:" + weekStart(k)] = 1; S.celebrated[k + ":boss"] = 1; changed = true;
+      setTimeout(() => toast(bs.icon + " " + bs.name + " defeated!", "+" + BOSS_XP + " XP", "good"), 1500);
+    }
     // prune old celebration keys
     const cutoff = addDays(k, -3);
-    Object.keys(S.celebrated).forEach((key) => { if (key.slice(0, 10) < cutoff) { delete S.celebrated[key]; changed = true; } });
+    Object.keys(S.celebrated).forEach((key) => { if (/^\d{4}-/.test(key) && key.slice(0, 10) < cutoff) { delete S.celebrated[key]; changed = true; } });
     if (changed) save();
   }
 
@@ -440,8 +582,9 @@
     const meals = MEALS.map(([id, name]) => {
       const items = d.foods.filter((f) => (f.meal || "snack") === id);
       const kc = items.reduce((a, f) => a + f.n.kcal, 0);
-      return '<div class="meal"><div class="meal-h">' + name + ' <span>' + fmt(kc) + ' kcal</span><button class="btn sm" data-add="' + id + '">+ Add</button></div>' +
-        (items.length ? items.map((f) => '<div class="fitem"><div class="n">' + esc(f.name) + "<small>" + esc(f.amountLabel) + " · P " + r0(f.n.p) + " · C " + r0(f.n.c) + " · F " + r0(f.n.f) + '</small></div><div class="k">' + fmt(f.n.kcal) + '</div><button class="x" data-del="' + esc(f.id) + '" aria-label="Remove">×</button></div>').join("") : '<div class="empty">Nothing yet</div>') + "</div>";
+      return '<div class="meal"><div class="meal-h">' + name + ' <span>' + fmt(kc) + ' kcal</span>' +
+        (items.length ? '<button class="btn sm ghost" data-savemeal="' + id + '">Save meal</button>' : "") + '<button class="btn sm" data-add="' + id + '">+ Add</button></div>' +
+        (items.length ? items.map((f) => '<div class="fitem fitem4"><button class="x star' + (isFav(f) ? " on" : "") + '" data-fav="' + esc(f.id) + '" aria-label="Favorite">' + (isFav(f) ? "★" : "☆") + '</button><div class="n">' + esc(f.name) + "<small>" + esc(f.amountLabel) + " · P " + r0(f.n.p) + " · C " + r0(f.n.c) + " · F " + r0(f.n.f) + '</small></div><div class="k">' + fmt(f.n.kcal) + '</div><button class="x" data-del="' + esc(f.id) + '" aria-label="Remove">×</button></div>').join("") : '<div class="empty">Nothing yet</div>') + "</div>";
     }).join("");
     const micros = microTargets().map((m) => {
       const have = tot[m.k] || 0, pc = m.goal ? have / m.goal : 0;
@@ -466,11 +609,27 @@
     $("#d-next").addEventListener("click", () => { if (!isToday) { foodDay = addDays(foodDay, 1); render(); } });
     $("#f-add").addEventListener("click", () => openAddFood(guessMeal(), k));
     $$("[data-add]", v).forEach((b) => b.addEventListener("click", () => openAddFood(b.dataset.add, k)));
+    $$("[data-fav]", v).forEach((b) => b.addEventListener("click", () => {
+      const f = getDay(k).foods.find((x) => x.id === b.dataset.fav); if (!f) return;
+      if (isFav(f)) { S.favs = S.favs.filter((x) => favKey(x) !== favKey(f)); toast("Removed from favorites"); }
+      else { S.favs.unshift({ id: uid(), name: f.name, amountLabel: f.amountLabel, n: Object.assign({}, f.n), src: f.src }); S.favs = S.favs.slice(0, 40); toast("⭐ Added to favorites", "Find it at the top of Log food"); }
+      save(); render();
+    }));
+    $$("[data-savemeal]", v).forEach((b) => b.addEventListener("click", () => {
+      const mealId = b.dataset.savemeal, items = getDay(k).foods.filter((f) => (f.meal || "snack") === mealId);
+      const def = (MEALS.find((m) => m[0] === mealId) || [, "Meal"])[1];
+      const name = (prompt("Name this meal (e.g. \"Usual breakfast\")", "My " + def.toLowerCase()) || "").trim();
+      if (!name) return;
+      S.meals.unshift({ id: uid(), name: name.slice(0, 40), items: items.map((f) => ({ name: f.name, amountLabel: f.amountLabel, n: Object.assign({}, f.n), src: f.src })) });
+      save(); render(); toast("🍱 Meal saved: " + name, "Log it with one tap from + Log food");
+    }));
     $$("[data-del]", v).forEach((b) => b.addEventListener("click", () => {
       const day = getDay(k), i = day.foods.findIndex((f) => f.id === b.dataset.del);
       if (i >= 0) { const [gone] = day.foods.splice(i, 1); save(); render(); toast("Removed", gone.name); }
     }));
   }
+  function favKey(f) { return f.name + "|" + f.amountLabel; }
+  function isFav(f) { return (S.favs || []).some((x) => favKey(x) === favKey(f)); }
   function guessMeal() { const h = new Date().getHours(); return h < 11 ? "breakfast" : h < 16 ? "lunch" : h < 21 ? "dinner" : "snack"; }
 
   // food "source" shape: { name, brand, src, per100: {kcal,p,c,f,...}, servingG, servingLabel }
@@ -618,11 +777,29 @@
       const box = $("#af-res", body); if (!box) return;
       const seq = ++searchSeq;
       if (!q) {
+        let quick = "";
+        if (S.meals.length) quick += '<div class="h2" style="margin-top:6px">🍱 My meals</div>' + S.meals.map((m) => {
+          const kc = m.items.reduce((a, f) => a + f.n.kcal, 0), pr = m.items.reduce((a, f) => a + f.n.p, 0);
+          return '<div class="res-row"><button class="res" data-meal="' + esc(m.id) + '"><span class="src">MEAL</span><b>' + esc(m.name) + "</b><span>" + m.items.length + (m.items.length === 1 ? " item · " : " items · ") + fmt(kc) + " kcal · P " + r0(pr) + 'g</span></button><button class="x" data-delmeal="' + esc(m.id) + '" aria-label="Delete meal">×</button></div>';
+        }).join("");
+        if (S.favs.length) quick += '<div class="h2">⭐ Favorites</div>' + S.favs.map((f) =>
+          '<div class="res-row"><button class="res" data-favadd="' + esc(f.id) + '"><span class="src">FAV</span><b>' + esc(f.name) + "</b><span>" + esc(f.amountLabel) + " · " + fmt(f.n.kcal) + " kcal · P " + r0(f.n.p) + 'g</span></button><button class="x" data-delfav="' + esc(f.id) + '" aria-label="Remove favorite">×</button></div>').join("");
+        box.innerHTML = quick;
+        $$("[data-meal]", box).forEach((b) => b.addEventListener("click", () => {
+          const m = S.meals.find((x) => x.id === b.dataset.meal); if (!m) return;
+          m.items.forEach((it) => { const d = getDay(k); d.foods.push({ id: uid(), t: Date.now(), name: it.name, amountLabel: it.amountLabel, n: Object.assign({}, it.n), src: it.src, meal }); });
+          save(); closeModal(); render(); toast("🍱 Logged: " + m.name, fmt(m.items.reduce((a, f) => a + f.n.kcal, 0)) + " kcal");
+        }));
+        $$("[data-favadd]", box).forEach((b) => b.addEventListener("click", () => {
+          const f = S.favs.find((x) => x.id === b.dataset.favadd); if (!f) return;
+          logFood(k, { name: f.name, amountLabel: f.amountLabel, n: Object.assign({}, f.n), src: f.src, meal }); closeModal();
+        }));
+        $$("[data-delmeal]", box).forEach((b) => b.addEventListener("click", () => { if (confirm("Delete this saved meal?")) { S.meals = S.meals.filter((x) => x.id !== b.dataset.delmeal); save(); showList(""); } }));
+        $$("[data-delfav]", box).forEach((b) => b.addEventListener("click", () => { S.favs = S.favs.filter((x) => x.id !== b.dataset.delfav); save(); showList(""); }));
         results = S.recents.slice(0, 12);
-        box.innerHTML = (results.length ? '<div class="h2" style="margin-top:6px">Recent</div>' : '<div class="h2" style="margin-top:6px">Popular basics</div>') +
-          (results.length ? "" : "") ;
+        box.innerHTML += (results.length ? '<div class="h2" style="margin-top:6px">Recent</div>' : '<div class="h2" style="margin-top:6px">Popular basics</div>');
         if (!results.length) results = builtinFoods().slice(0, 12);
-        box.innerHTML += results.map(resHTML).join("");
+        box.insertAdjacentHTML("beforeend", results.map(resHTML).join(""));
         bindRes(box);
         return;
       }
@@ -741,7 +918,7 @@
           const it = items[+row.dataset.pi], g = (c) => Math.max(0, parseFloat($(c, row).value) || 0);
           const mm = it.mult || 1;
           const n = { kcal: g(".pi-k"), p: g(".pi-p"), c: g(".pi-c"), f: g(".pi-f"), fiber: (it.fiber || 0) * mm, sugar: (it.sugar || 0) * mm, sat: (it.sat || 0) * mm, sodium: (it.sodium || 0) * mm, potassium: 0, calcium: 0, iron: 0, vitc: 0 };
-          logFood(k, { name: ($(".pi-name", row).value.trim() || it.name) + (it.label ? "" : " 📷"), amountLabel: it.portion || "1 portion", meal: meal1, n });
+          logFood(k, { name: ($(".pi-name", row).value.trim() || it.name) + (it.label ? "" : " 📷"), amountLabel: it.portion || "1 portion", meal: meal1, n, src: "photo" });
         });
         closeModal();
       });
@@ -752,7 +929,7 @@
       return '<button class="res" data-i="' + i + '"><span class="src">' + esc(f.src) + "</span><b>" + esc(f.name) + "</b><span>" +
         (f.brand ? esc(f.brand) + " · " : "") + esc(f.servingLabel) + " · " + fmt(per.kcal) + " kcal · P " + r0(per.p) + "g</span></button>";
     }
-    function bindRes(box) { $$(".res", box).forEach((b) => b.addEventListener("click", () => openAmount(results[+b.dataset.i]))); }
+    function bindRes(box) { $$(".res[data-i]", box).forEach((b) => b.addEventListener("click", () => openAmount(results[+b.dataset.i]))); }
 
     function openAmount(food) {
       let unit = "serving", qty = 1;
@@ -781,7 +958,7 @@
       $("#am-add", body).addEventListener("click", () => {
         if (!(grams() > 0)) { toast("Enter an amount"); return; }
         const label = unit === "serving" ? (qty === 1 ? food.servingLabel : r1(qty) + " × " + food.servingLabel) : r1(qty) + (unit === "g" ? " g" : " oz");
-        logFood(k, { name: food.name + (food.brand ? " (" + food.brand + ")" : ""), amountLabel: label, meal: $("#am-meal", body).value, n: scaleNutrients(food.per100, grams()) });
+        logFood(k, { name: food.name + (food.brand ? " (" + food.brand + ")" : ""), amountLabel: label, meal: $("#am-meal", body).value, n: scaleNutrients(food.per100, grams()), src: food.viaBarcode ? "barcode" : food.src === "AI" ? "ai" : "search" });
         remember(food);
         closeModal();
       });
@@ -929,7 +1106,7 @@
       const res = await withTimeout("https://world.openfoodfacts.org/api/v2/product/" + encodeURIComponent(c) + ".json?fields=code,product_name,brands,nutriments,serving_size,serving_quantity", 10000);
       if (!res.ok) continue;
       const js = await res.json();
-      if (js.status === 1 && js.product) { const f = offToFood(js.product); if (f) return f; }
+      if (js.status === 1 && js.product) { const f = offToFood(js.product); if (f) { f.viaBarcode = true; return f; } }
     }
     return null;
   }
@@ -969,6 +1146,14 @@
       '<p class="note">Based on: ' + esc(p.sex) + ", " + p.age + " yrs, " + ht + ", " + wt + ", " + esc(ACTIVITY[p.activity].label.toLowerCase()) + ", goal: " + esc(GOALS[p.goal].label.toLowerCase()) +
       ". Your body burns about " + fmt(t.tdee) + " kcal a day.</p>" +
       '<button class="btn block" id="pl-edit" style="margin-top:10px">Update my stats (new weight, goal…)</button>' +
+      '<div class="h2">Badges (' + BADGES.filter((b) => S.badges[b[0]]).length + "/" + BADGES.length + ')</div><div class="badges">' +
+      BADGES.map(([id, icon, name, desc]) => '<div class="bdg' + (S.badges[id] ? " got" : "") + '"><i>' + (S.badges[id] ? icon : "🔒") + "</i><b>" + esc(name) + "</b><span>" + esc(desc) + "</span></div>").join("") + "</div>" +
+      '<div class="h2">Title</div><select id="pl-title">' + availableTitles(L).map((t) => '<option' + (t === currentTitle(L) ? " selected" : "") + ">" + esc(t) + "</option>").join("") + "</select>" +
+      '<p class="note">Level up and earn badges to unlock more titles.</p>' +
+      '<div class="h2">Theme</div><div class="themes">' + THEMES.map((th) => {
+        const ok = themeUnlocked(th, L), on = (S.settings.theme || "azure") === th[0];
+        return '<button class="theme' + (on ? " on" : "") + '" data-theme-pick="' + th[0] + '"' + (ok ? "" : " disabled") + ' style="--sw:' + th[3] + '"><i></i>' + th[1] + "<span>" + (ok ? (on ? "In use" : "Unlocked") : "🔒 " + (typeof th[2] === "number" ? "Level " + th[2] : "Boss Slayer badge")) + "</span></button>";
+      }).join("") + "</div>" +
 
       '<div class="h2">Setup guides</div>' +
       '<details class="guide"><summary>💧 Water reminders (4× a day)</summary><div class="gb">' +
@@ -1011,6 +1196,8 @@
       '<p class="note">Cal Quest gives general estimates, not medical advice. Talk to a doctor before big diet changes.</p>';
 
     $("#pl-edit").addEventListener("click", () => renderOnboarding(true));
+    $("#pl-title").addEventListener("change", (e) => { S.settings.title = e.target.value; save(); render(); toast("Title equipped", e.target.value); });
+    $$("[data-theme-pick]", v).forEach((b) => b.addEventListener("click", () => { S.settings.theme = b.dataset.themePick; save(); render(); }));
     $$("[data-rem]", v).forEach((inp) => inp.addEventListener("change", () => {
       if (!/^\d\d:\d\d$/.test(inp.value)) return;
       S.settings.reminders[+inp.dataset.rem] = inp.value;
@@ -1032,6 +1219,86 @@
       if (confirm("Erase all your data on this phone? This can't be undone.")) { localStorage.removeItem(STORE_KEY); S = fresh(); tab = "quest"; render(); }
     });
   }
+  // ---------------------------------------------------------------- STATS
+  let statRange = 7;
+  function renderStats(v) {
+    const today = dayKey(), p = S.profile, imp = p.units === "imperial";
+    const days = []; for (let i = statRange - 1; i >= 0; i--) days.push(addDays(today, -i));
+    const lab = (k) => statRange === 7 ? "MTWTFSS"[(keyToDate(k).getDay() + 6) % 7] : String(keyToDate(k).getDate());
+    const tot = days.map((k) => totals(peekDay(k)));
+    const tg = days.map((k) => peekDay(k).t || S.targets);
+    const avg = (arr) => { const xs = arr.filter((x) => x > 0); return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0; };
+    const kc = tot.map((t) => t.kcal), pr = tot.map((t) => t.p), wa = days.map((k) => peekDay(k).water || 0), stp = days.map((k) => peekDay(k).steps || 0);
+    const wKeys = Object.keys(S.weights).sort();
+    const lastW = wKeys.length ? S.weights[wKeys[wKeys.length - 1]] : p.weightKg;
+    const show = (kg) => imp ? r1(kg * 2.20462) : r1(kg), unitW = imp ? "lb" : "kg";
+    const firstW = wKeys.length ? S.weights[wKeys[0]] : null;
+    const change = firstW != null && wKeys.length > 1 ? lastW - firstW : null;
+    v.innerHTML =
+      '<section class="panel">' + corners() + '<h1 class="panel-title">Progress</h1>' +
+      '<div class="tabs" style="margin-top:12px"><button data-range="7" class="' + (statRange === 7 ? "active" : "") + '">7 days</button><button data-range="30" class="' + (statRange === 30 ? "active" : "") + '">30 days</button></div>' +
+      '<div class="statgrid"><div class="stat"><span>Avg calories</span><b>' + fmt(avg(kc)) + '</b></div><div class="stat"><span>Avg protein</span><b>' + r0(avg(pr)) + ' g</b></div>' +
+      '<div class="stat"><span>Quests cleared</span><b>' + days.filter((k) => S.days[k] && questState(k).cleared).length + "/" + statRange + '</b></div><div class="stat"><span>Weight</span><b>' + show(lastW) + " " + unitW + (change != null ? ' <small style="font-size:13px;color:' + (change <= 0 ? "var(--good)" : "var(--warn)") + '">' + (change > 0 ? "+" : "") + show(change) + "</small>" : "") + "</b></div></div></section>" +
+      '<div class="h2">Log your weight</div><div class="row"><input id="w-in" type="number" inputmode="decimal" step="0.1" placeholder="' + show(lastW) + " " + unitW + '"><button class="btn primary" id="w-save" style="flex:0 0 110px">Save</button></div>' +
+      '<p class="note">Weigh in the morning, same time each day. Your calorie targets update with your new weight.</p>' +
+      chartCard("Weight (" + unitW + ")", lineChart(wKeys.filter((k) => k >= addDays(today, -Math.max(statRange, 30) + 1)).map((k) => ({ k, v: +show(S.weights[k]) })), addDays(today, -Math.max(statRange, 30) + 1), today), "Last 30 days") +
+      chartCard("Calories", barChart(days.map(lab), kc, tg.map((t) => t.kcal), days), "Line = your target") +
+      chartCard("Protein (g)", barChart(days.map(lab), pr.map(r0), tg.map((t) => t.protein), days), "Line = your target") +
+      chartCard("Water (bottles)", barChart(days.map(lab), wa, tg.map((t) => t.water), days), "Line = your target") +
+      chartCard("Steps", barChart(days.map(lab), stp, tg.map((t) => t.steps), days), "Line = your target") +
+      '<div class="h2">This week\'s boss</div>' + bossHTML(weekStart(today), false);
+    $$("[data-range]", v).forEach((b) => b.addEventListener("click", () => { statRange = +b.dataset.range; render(); }));
+    $("#w-save").addEventListener("click", () => {
+      let w = parseFloat($("#w-in").value); if (!(w > 0)) { toast("Enter your weight"); return; }
+      const kg = imp ? w / 2.20462 : w;
+      if (kg < 30 || kg > 300) { toast("That weight looks off"); return; }
+      S.weights[today] = kg;
+      S.profile.weightKg = kg; S.targets = computeTargets(S.profile); getDay().t = Object.assign({}, S.targets);
+      save(); render(); toast("⚖️ Weight saved", "Targets updated: " + fmt(S.targets.kcal) + " kcal · " + S.targets.protein + "g protein");
+    });
+    $$(".chart", v).forEach(bindChart);
+  }
+  function chartCard(title, svg, note) { return '<section class="chart-card"><div class="chart-h"><b>' + esc(title) + "</b><span>" + esc(note) + "</span></div>" + svg + '<div class="chart-tip">Tap a bar or point to see the value</div></section>'; }
+  function niceMax(v) { if (v <= 0) return 1; const e = Math.pow(10, Math.floor(Math.log10(v))); const f = v / e; return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * e; }
+  function barChart(labels, vals, targets, keys) {
+    const W = 340, H = 150, L = 34, R = 6, T = 10, B = 20, n = vals.length;
+    const max = niceMax(Math.max(1, ...vals, ...targets) * 1.05), pw = W - L - R, ph = H - T - B, bw = Math.max(3, Math.min(22, (pw / n) * 0.6));
+    const y = (v) => T + ph - (v / max) * ph, x = (i) => L + (pw / n) * (i + 0.5);
+    let g = "";
+    [0, 0.5, 1].forEach((f) => { const yy = y(max * f); g += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + yy + '" y2="' + yy + '" class="grid"/><text x="' + (L - 4) + '" y="' + (yy + 3) + '" class="ax" text-anchor="end">' + shortNum(max * f) + "</text>"; });
+    vals.forEach((v, i) => {
+      const h = Math.max(0, (v / max) * ph), x0 = x(i) - bw / 2, top = T + ph - h, r = Math.min(4, bw / 2, h);
+      const hit = targets[i] && v >= targets[i] * 0.9;
+      if (h > 0) g += '<path class="bar' + (hit ? " hit" : "") + '" d="M' + x0 + "," + (T + ph) + "V" + (top + r) + "Q" + x0 + "," + top + " " + (x0 + r) + "," + top + "H" + (x0 + bw - r) + "Q" + (x0 + bw) + "," + top + " " + (x0 + bw) + "," + (top + r) + "V" + (T + ph) + 'Z"/>';
+      g += '<rect class="hitbox" x="' + (L + (pw / n) * i) + '" y="' + T + '" width="' + pw / n + '" height="' + ph + '" data-tip="' + esc(keyToDate(keys[i]).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" }) + ": " + fmt(v) + (targets[i] ? " / " + fmt(targets[i]) : "")) + '"/>';
+      if (n <= 7 || i % 5 === 4 || i === n - 1) g += '<text x="' + x(i) + '" y="' + (H - 6) + '" class="ax" text-anchor="middle">' + esc(labels[i]) + "</text>";
+    });
+    // target line (step through days in case the target changed)
+    let d = ""; targets.forEach((t, i) => { const yy = y(t), x1 = L + (pw / n) * i, x2 = x1 + pw / n; d += (i ? "L" : "M") + x1 + "," + yy + "L" + x2 + "," + yy; });
+    g += '<path d="' + d + '" class="tline"/>';
+    return '<svg class="chart" viewBox="0 0 ' + W + " " + H + '" role="img">' + g + "</svg>";
+  }
+  function lineChart(pts, fromK, toK) {
+    const W = 340, H = 150, L = 34, R = 10, T = 12, B = 20;
+    if (!pts.length) return '<div class="empty" style="padding:24px 0;text-align:center">No weigh-ins yet. Log your weight above to start your chart.</div>';
+    const vs = pts.map((p) => p.v), lo = Math.floor(Math.min(...vs) - 2), hi = Math.ceil(Math.max(...vs) + 2);
+    const span = Math.max(1, (keyToDate(toK) - keyToDate(fromK)) / 864e5);
+    const x = (k) => L + ((keyToDate(k) - keyToDate(fromK)) / 864e5 / span) * (W - L - R), y = (v) => T + (H - T - B) - ((v - lo) / (hi - lo)) * (H - T - B);
+    let g = "";
+    [lo, (lo + hi) / 2, hi].forEach((v) => { g += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + y(v) + '" y2="' + y(v) + '" class="grid"/><text x="' + (L - 4) + '" y="' + (y(v) + 3) + '" class="ax" text-anchor="end">' + r1(v) + "</text>"; });
+    g += '<text x="' + L + '" y="' + (H - 6) + '" class="ax">' + keyToDate(fromK).toLocaleDateString(undefined, { month: "short", day: "numeric" }) + '</text><text x="' + (W - R) + '" y="' + (H - 6) + '" class="ax" text-anchor="end">Today</text>';
+    if (pts.length > 1) g += '<path class="wline" d="' + pts.map((p, i) => (i ? "L" : "M") + x(p.k) + "," + y(p.v)).join("") + '"/>';
+    pts.forEach((p) => { g += '<circle class="wdot" cx="' + x(p.k) + '" cy="' + y(p.v) + '" r="4"/><circle class="hitbox" cx="' + x(p.k) + '" cy="' + y(p.v) + '" r="14" data-tip="' + esc(keyToDate(p.k).toLocaleDateString(undefined, { month: "short", day: "numeric" }) + ": " + p.v) + '"/>'; });
+    return '<svg class="chart" viewBox="0 0 ' + W + " " + H + '" role="img">' + g + "</svg>";
+  }
+  function shortNum(v) { return v >= 1000 ? r1(v / 1000) + "k" : String(r0(v)); }
+  function bindChart(svg) {
+    const tip = svg.parentNode.querySelector(".chart-tip");
+    svg.querySelectorAll(".hitbox").forEach((h) => h.addEventListener("click", () => {
+      svg.querySelectorAll(".sel").forEach((x) => x.classList.remove("sel")); h.classList.add("sel"); tip.textContent = h.dataset.tip;
+    }));
+  }
+
   function kv(k, v) { return '<div class="kv"><span>' + esc(k) + "</span><b>" + esc(v) + "</b></div>"; }
   function exportData() {
     const blob = new Blob([JSON.stringify(S)], { type: "application/json" });
