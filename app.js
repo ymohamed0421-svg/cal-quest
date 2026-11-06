@@ -35,11 +35,25 @@
     return fresh();
   }
   let S = load();
+  setTimeout(() => primeSnap(), 0);
   if (!S.penaltySince) { S.penaltySince = dayKey0(); }
   function dayKey0() { const d = new Date(); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); }
-  function save() {
+  // Remember what each day looked like, so we know which days changed (for syncing between devices).
+  const SNAP = {};
+  function snapOf(d) { const c = Object.assign({}, d); delete c.u; return JSON.stringify(c); }
+  function stampChanges() {
+    const now = Date.now();
+    Object.keys(S.days).forEach((k) => { const j = snapOf(S.days[k]); if (SNAP[k] !== undefined && SNAP[k] !== j) S.days[k].u = now; else if (SNAP[k] === undefined && !S.days[k].u) S.days[k].u = now; SNAP[k] = j; });
+    const pj = JSON.stringify(S.profile);
+    if (SNAP.__profile !== undefined && SNAP.__profile !== pj) S.profileAt = now;
+    SNAP.__profile = pj;
+  }
+  function primeSnap() { Object.keys(S.days).forEach((k) => (SNAP[k] = snapOf(S.days[k]))); SNAP.__profile = JSON.stringify(S.profile); }
+  function save(opts) {
+    stampChanges();
     try { localStorage.setItem(STORE_KEY, JSON.stringify(S)); }
     catch (e) { toast("Could not save", "Your phone storage may be full."); }
+    if (!(opts && opts.noSync) && typeof Cloud !== "undefined") Cloud.queuePush();
   }
 
   // ---------------------------------------------------------------- helpers
@@ -388,7 +402,7 @@
       '<p class="reward">Reward : ' + FULL_REWARD + ' XP</p>' +
       '<div class="qfoot"><button class="btn sm" data-go="food">+ Food</button><div class="timer" id="timer">--:--:--<small>TIME LEFT</small></div><button class="btn sm" data-go="water">+ Water</button></div>' +
       "</section>" +
-      penaltyHTML(k) + bossHTML(weekStart(k), true) +
+      penaltyHTML(k) + bossHTML(weekStart(k), true) + '<div id="lb-slot"></div>' +
       '<div class="quick"><button class="btn" id="qb-bottle">+1 Bottle</button><button class="btn" id="qb-food">Log food</button><button class="btn" id="qb-steps">Steps</button></div>';
     $$(".qrow", v).forEach((b) => b.addEventListener("click", () => {
       const id = b.dataset.q;
@@ -400,6 +414,7 @@
     $("#qb-bottle").addEventListener("click", () => addWater(1));
     $("#qb-food").addEventListener("click", () => openAddFood());
     $("#qb-steps").addEventListener("click", openStepsModal);
+    if (typeof Cloud !== "undefined") Cloud.renderLeaderboard($("#lb-slot"));
     tickTimer();
   }
   function penaltyHTML(k) {
@@ -1146,6 +1161,7 @@
       '<p class="note">Based on: ' + esc(p.sex) + ", " + p.age + " yrs, " + ht + ", " + wt + ", " + esc(ACTIVITY[p.activity].label.toLowerCase()) + ", goal: " + esc(GOALS[p.goal].label.toLowerCase()) +
       ". Your body burns about " + fmt(t.tdee) + " kcal a day.</p>" +
       '<button class="btn block" id="pl-edit" style="margin-top:10px">Update my stats (new weight, goal…)</button>' +
+      '<div id="acct-slot"></div>' +
       '<div class="h2">Badges (' + BADGES.filter((b) => S.badges[b[0]]).length + "/" + BADGES.length + ')</div><div class="badges">' +
       BADGES.map(([id, icon, name, desc]) => '<div class="bdg' + (S.badges[id] ? " got" : "") + '"><i>' + (S.badges[id] ? icon : "🔒") + "</i><b>" + esc(name) + "</b><span>" + esc(desc) + "</span></div>").join("") + "</div>" +
       '<div class="h2">Title</div><select id="pl-title">' + availableTitles(L).map((t) => '<option' + (t === currentTitle(L) ? " selected" : "") + ">" + esc(t) + "</option>").join("") + "</select>" +
@@ -1196,12 +1212,13 @@
       '<p class="note">Cal Quest gives general estimates, not medical advice. Talk to a doctor before big diet changes.</p>';
 
     $("#pl-edit").addEventListener("click", () => renderOnboarding(true));
+    if (typeof Cloud !== "undefined") Cloud.renderAccount($("#acct-slot"));
     $("#pl-title").addEventListener("change", (e) => { S.settings.title = e.target.value; save(); render(); toast("Title equipped", e.target.value); });
     $$("[data-theme-pick]", v).forEach((b) => b.addEventListener("click", () => { S.settings.theme = b.dataset.themePick; save(); render(); }));
     $$("[data-rem]", v).forEach((inp) => inp.addEventListener("change", () => {
       if (!/^\d\d:\d\d$/.test(inp.value)) return;
       S.settings.reminders[+inp.dataset.rem] = inp.value;
-      S.settings.reminders.sort(); save(); toast("Check-in times saved");
+      S.settings.reminders.sort(); save(); toast("Check-in times saved"); Cloud.refreshPushTimes();
     }));
     $("#pl-share").addEventListener("click", async () => {
       const url = location.origin + location.pathname;
@@ -1216,7 +1233,7 @@
     $("#pl-usda").addEventListener("change", (e) => { S.settings.usdaKey = e.target.value.trim(); save(); toast("Saved"); });
     if ($("#pl-gk")) $("#pl-gk").addEventListener("click", () => { S.settings.geminiKey = ""; save(); render(); toast("Photo AI key removed"); });
     $("#pl-reset").addEventListener("click", () => {
-      if (confirm("Erase all your data on this phone? This can't be undone.")) { localStorage.removeItem(STORE_KEY); S = fresh(); tab = "quest"; render(); }
+      if (confirm("Erase all your data on this phone? This can't be undone.")) { localStorage.removeItem(STORE_KEY); S = fresh(); primeSnap(); tab = "quest"; if (typeof Cloud !== "undefined") Cloud.signOut(true); render(); }
     });
   }
   // ---------------------------------------------------------------- STATS
@@ -1431,14 +1448,222 @@
     draw();
   }
 
+  // ---------------------------------------------------------------- CLOUD (Supabase)
+  const CFG = window.CALQUEST_CONFIG || {};
+  const Cloud = (() => {
+    const enabled = !!(CFG.supabaseUrl && CFG.supabaseKey && window.supabase);
+    const sb = enabled ? window.supabase.createClient(CFG.supabaseUrl, CFG.supabaseKey, { auth: { persistSession: true, autoRefreshToken: true, storageKey: "calquest.auth", detectSessionInUrl: false } }) : null;
+    let user = null, me = null, pushTimer = null, syncing = false, lastSync = null, lbCache = null;
+
+    async function init() {
+      if (!enabled) return;
+      const { data } = await sb.auth.getSession();
+      user = data.session ? data.session.user : null;
+      sb.auth.onAuthStateChange((_e, session) => { user = session ? session.user : null; });
+      if (user) { await loadMe(); await pull(); }
+    }
+    async function loadMe() {
+      const { data } = await sb.from("players").select("*").eq("id", user.id).maybeSingle();
+      me = data || null;
+    }
+
+    // ---- merge another device's copy into this one
+    function score(d) { return (d.foods || []).length * 10 + (d.water || 0) + (d.steps || 0) / 1000 + Object.keys(d.checkins || {}).length; }
+    function merge(remote) {
+      if (!remote || typeof remote !== "object") return false;
+      if (!S.profile && remote.profile) { S = Object.assign(fresh(), remote, { settings: Object.assign(fresh().settings, remote.settings || {}, { geminiKey: S.settings.geminiKey, usdaKey: S.settings.usdaKey }) }); primeSnap(); return true; }
+      let changed = false;
+      Object.keys(remote.days || {}).forEach((k) => {
+        const r = remote.days[k], l = S.days[k];
+        if (!l) { S.days[k] = r; changed = true; return; }
+        const ru = r.u || 0, lu = l.u || 0;
+        if (ru > lu || (!ru && !lu && score(r) > score(l))) { S.days[k] = r; changed = true; }
+      });
+      if (remote.profile && (remote.profileAt || 0) > (S.profileAt || 0)) { S.profile = remote.profile; S.targets = remote.targets; S.profileAt = remote.profileAt; changed = true; }
+      ["weights", "badges", "celebrated"].forEach((key) => Object.keys(remote[key] || {}).forEach((k) => { if (S[key][k] === undefined) { S[key][k] = remote[key][k]; changed = true; } }));
+      ["meals", "favs"].forEach((key) => (remote[key] || []).forEach((m) => { if (!S[key].some((x) => x.id === m.id)) { S[key].push(m); changed = true; } }));
+      if ((remote.lastLevel || 1) > (S.lastLevel || 1)) S.lastLevel = remote.lastLevel;
+      if (remote.penaltySince && (!S.penaltySince || remote.penaltySince < S.penaltySince)) S.penaltySince = remote.penaltySince;
+      return changed;
+    }
+    function cleanCopy() {
+      const c = JSON.parse(JSON.stringify(S));
+      c.settings = Object.assign({}, c.settings, { geminiKey: "", usdaKey: "" }); // keys stay on this phone
+      return c;
+    }
+    async function pull() {
+      if (!user) return;
+      const { data, error } = await sb.from("saves").select("data, updated_at").eq("id", user.id).maybeSingle();
+      if (error) return;
+      if (data && merge(data.data)) { save({ noSync: true }); render(); }
+      await push();
+    }
+    function queuePush() { if (!user) return; clearTimeout(pushTimer); pushTimer = setTimeout(push, 3000); }
+    async function push() {
+      if (!user || syncing) return;
+      syncing = true;
+      try {
+        const now = new Date().toISOString();
+        const r1x = await sb.from("saves").upsert({ id: user.id, data: cleanCopy(), updated_at: now });
+        if (r1x.error) throw r1x.error;
+        if (me) {
+          const k = dayKey(), qs = questState(k), xp = totalXP(), L = levelFromXP(xp);
+          await sb.from("players").update({ level: L, xp, streak: streak(), title: currentTitle(L), theme: S.settings.theme || "azure", stats_day: k,
+            today_pct: Math.round(qs.overall * 100), cleared_today: qs.cleared, boss_dmg: bossState(weekStart(k)).dmg, updated_at: now }).eq("id", user.id);
+        }
+        lastSync = new Date();
+        const el = $("#acct-sync"); if (el) el.textContent = "Last synced " + lastSync.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+      } catch (e) { /* offline: try again on next save */ }
+      syncing = false;
+    }
+
+    // ---- account UI
+    function renderAccount(slot) {
+      if (!slot) return;
+      if (!enabled) { slot.innerHTML = ""; return; }
+      if (!user) {
+        slot.innerHTML = '<div class="h2">☁️ Account</div><section class="chart-card">' +
+          '<p class="explain" style="margin-top:0">Make a free account to back up your progress, use Cal Quest on other devices, and add friends to your leaderboard.</p>' +
+          '<div class="tabs"><button data-am="up" class="active">Sign up</button><button data-am="in">Log in</button></div>' +
+          '<div id="am-user"><label class="f" for="ac-user">Username (friends find you by this)</label><input id="ac-user" maxlength="20" autocapitalize="off" autocomplete="username" placeholder="e.g. youssef_lifts"></div>' +
+          '<label class="f" for="ac-email">Email</label><input id="ac-email" type="email" autocapitalize="off" autocomplete="email" placeholder="you@example.com">' +
+          '<label class="f" for="ac-pass">Password (6+ characters)</label><input id="ac-pass" type="password" autocomplete="current-password">' +
+          '<div class="err" id="ac-err"></div><button class="btn primary block" id="ac-go">Create account</button></section>';
+        let mode = "up";
+        $$("[data-am]", slot).forEach((b) => b.addEventListener("click", () => {
+          mode = b.dataset.am; $$("[data-am]", slot).forEach((x) => x.classList.toggle("active", x === b));
+          $("#am-user", slot).classList.toggle("hidden", mode === "in"); $("#ac-go", slot).textContent = mode === "up" ? "Create account" : "Log in";
+        }));
+        $("#ac-go", slot).addEventListener("click", async () => {
+          const err = $("#ac-err", slot), btn = $("#ac-go", slot);
+          const email = $("#ac-email", slot).value.trim(), pass = $("#ac-pass", slot).value, uname = $("#ac-user", slot).value.trim();
+          err.textContent = "";
+          if (!/^\S+@\S+\.\S+$/.test(email)) { err.textContent = "Enter a real email"; return; }
+          if (pass.length < 6) { err.textContent = "Password needs 6+ characters"; return; }
+          if (mode === "up" && !/^[A-Za-z0-9_]{3,20}$/.test(uname)) { err.textContent = "Username: 3–20 letters, numbers or _"; return; }
+          btn.disabled = true; btn.textContent = "One sec…";
+          try {
+            if (mode === "up") {
+              const taken = await sb.from("players").select("id").ilike("username", uname).maybeSingle();
+              const { data, error } = await sb.auth.signUp({ email, password: pass });
+              if (error) throw error;
+              if (!data.session) { err.textContent = "Check your email to confirm, then come back and Log in."; btn.disabled = false; btn.textContent = "Create account"; return; }
+              user = data.user;
+              if (taken.data) { /* taken by someone else; signed-in users can see it */ }
+              const ins = await sb.from("players").insert({ id: user.id, username: uname });
+              if (ins.error) { await sb.from("players").insert({ id: user.id, username: uname + "_" + Math.floor(Math.random() * 90 + 10) }); toast("That username was taken", "We added a number. You can share it as-is."); }
+            } else {
+              const { data, error } = await sb.auth.signInWithPassword({ email, password: pass });
+              if (error) throw error;
+              user = data.user;
+            }
+            await loadMe(); await pull(); render(); toast("☁️ Signed in", "Your progress now backs up automatically");
+          } catch (e) {
+            err.textContent = /Invalid login/i.test(e.message) ? "Wrong email or password" : /already registered/i.test(e.message) ? "That email already has an account. Tap Log in." : (e.message || "Something went wrong");
+            btn.disabled = false; btn.textContent = mode === "up" ? "Create account" : "Log in";
+          }
+        });
+        return;
+      }
+      slot.innerHTML = '<div class="h2">☁️ Account</div><section class="chart-card">' +
+        kv("Username", me ? me.username : "…") + kv("Email", user.email || "") +
+        '<p class="note" id="acct-sync">' + (lastSync ? "Last synced " + lastSync.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "Backs up automatically") + "</p>" +
+        '<div class="row"><button class="btn" id="ac-sync">Sync now</button><button class="btn ghost" id="ac-out">Log out</button></div></section>' + pushHTML();
+      $("#ac-sync", slot).addEventListener("click", async () => { await pull(); toast("☁️ Synced"); });
+      $("#ac-out", slot).addEventListener("click", () => { if (confirm("Log out? Your data stays on this phone.")) signOut(); });
+      bindPush(slot);
+      if (!me) loadMe().then(() => render());
+    }
+    async function signOut(silent) { if (!enabled) return; try { await sb.auth.signOut(); } catch (e) { /* ignore */ } user = null; me = null; lbCache = null; if (!silent) { render(); toast("Logged out"); } }
+
+    // ---- friends leaderboard
+    async function fetchBoard() {
+      const f = await sb.from("follows").select("followee").eq("follower", user.id);
+      const ids = [user.id].concat((f.data || []).map((x) => x.followee));
+      const { data } = await sb.from("players").select("id, username, level, xp, streak, title, stats_day, today_pct, cleared_today").in("id", ids);
+      return (data || []).sort((a, b) => b.xp - a.xp);
+    }
+    function boardHTML(rows) {
+      const k = dayKey();
+      return rows.map((r, i) => '<div class="lb-row' + (r.id === user.id ? " me" : "") + '"><b class="rk">' + (i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : i + 1) + '</b><div class="who">' + esc(r.username) + "<small>Lv " + r.level + " · " + esc(r.title) + '</small></div><div class="lb-st">' + (r.streak ? "🔥" + r.streak : "") +
+        '<small>' + (r.stats_day === k ? (r.cleared_today ? "✓ cleared" : r.today_pct + "% today") : "–") + "</small></div>" +
+        (r.id !== user.id ? '<button class="x" data-unf="' + esc(r.id) + '" aria-label="Remove friend">×</button>' : "<span></span>") + "</div>").join("");
+    }
+    function renderLeaderboard(slot) {
+      if (!slot || !enabled) return;
+      if (!user) { slot.innerHTML = '<section class="chart-card"><div class="chart-h"><b>🏆 Friends leaderboard</b></div><p class="explain" style="margin:0">Make a free account in the <b>Player</b> tab to compete with friends.</p></section>'; return; }
+      const paint = (rows) => {
+        slot.innerHTML = '<section class="chart-card"><div class="chart-h"><b>🏆 Friends leaderboard</b><span>by total XP</span></div>' + boardHTML(rows) +
+          '<div class="row" style="margin-top:10px"><input id="fr-in" placeholder="Friend\'s username" autocapitalize="off"><button class="btn" id="fr-add" style="flex:0 0 90px">Add</button></div>' +
+          '<p class="note">Your username: <b>' + esc(me ? me.username : "") + '</b>. Friends see your level, streak and today\'s %, never your food.</p></section>';
+        $("#fr-add", slot).addEventListener("click", async () => {
+          const name = $("#fr-in", slot).value.trim(); if (!name) return;
+          const { data } = await sb.from("players").select("id, username").ilike("username", name).maybeSingle();
+          if (!data) { toast("No player called " + name, "Check the spelling with your friend"); return; }
+          if (data.id === user.id) { toast("That's you 😄"); return; }
+          const r = await sb.from("follows").insert({ follower: user.id, followee: data.id });
+          if (r.error && !/duplicate/i.test(r.error.message)) { toast("Couldn't add friend", r.error.message); return; }
+          toast("🤝 Added " + data.username); lbCache = null; renderLeaderboard(slot);
+        });
+        $$("[data-unf]", slot).forEach((b) => b.addEventListener("click", async () => {
+          if (!confirm("Remove this friend from your leaderboard?")) return;
+          await sb.from("follows").delete().eq("follower", user.id).eq("followee", b.dataset.unf); lbCache = null; renderLeaderboard(slot);
+        }));
+      };
+      if (lbCache && Date.now() - lbCache.t < 60000) paint(lbCache.rows);
+      else { slot.innerHTML = '<section class="chart-card"><div class="chart-h"><b>🏆 Friends leaderboard</b></div><div class="loading">Loading</div></section>'; fetchBoard().then((rows) => { lbCache = { t: Date.now(), rows }; if (document.body.contains(slot)) paint(rows); }).catch(() => (slot.innerHTML = "")); }
+    }
+
+    // ---- push reminders
+    const standalone = () => window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+    const pushSupported = () => "serviceWorker" in navigator && "PushManager" in window && "Notification" in window && !!CFG.vapidPublicKey;
+    function pushHTML() {
+      let body;
+      if (!standalone()) body = '<p class="explain" style="margin:0">Open Cal Quest from your <b>home screen icon</b> (not Safari) to turn on push reminders.</p>';
+      else if (!pushSupported()) body = '<p class="explain" style="margin:0">This phone doesn\'t support web push. Update to iOS 16.4 or newer, or use the Reminders app guide below.</p>';
+      else if (Notification.permission === "granted" && S.settings.pushOn) body = '<p class="explain" style="margin:0">✅ On. You\'ll get a ping at ' + S.settings.reminders.map(to12).join(", ") + '.</p><div class="row" style="margin-top:10px"><button class="btn sm" id="pu-test">Update times</button><button class="btn sm ghost" id="pu-off">Turn off</button></div>';
+      else body = '<p class="explain" style="margin:0">Get a notification at ' + S.settings.reminders.map(to12).join(", ") + ' to log your water.</p><button class="btn primary block" style="margin-top:10px" id="pu-on">🔔 Turn on water reminders</button>';
+      return '<div class="h2">🔔 Push reminders</div><section class="chart-card">' + body + "</section>";
+    }
+    async function subscribe() {
+      const reg = await navigator.serviceWorker.ready;
+      const key = Uint8Array.from(atob(CFG.vapidPublicKey.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((CFG.vapidPublicKey.length + 3) % 4)), (c) => c.charCodeAt(0));
+      const sub = (await reg.pushManager.getSubscription()) || (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key }));
+      const j = sub.toJSON();
+      const r = await sb.from("push_subs").upsert({ endpoint: j.endpoint, user_id: user.id, sub: j, reminders: S.settings.reminders, tz: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC" });
+      if (r.error) throw r.error;
+    }
+    function bindPush(slot) {
+      const on = $("#pu-on", slot), upd = $("#pu-test", slot), off = $("#pu-off", slot);
+      if (on) on.addEventListener("click", async () => {
+        try {
+          const perm = await Notification.requestPermission();
+          if (perm !== "granted") { toast("Notifications are blocked", "Settings → Notifications → Cal Quest → Allow"); return; }
+          await subscribe(); S.settings.pushOn = true; save(); render(); toast("🔔 Water reminders on");
+        } catch (e) { toast("Couldn't turn on reminders", e.message || ""); }
+      });
+      if (upd) upd.addEventListener("click", async () => { try { await subscribe(); toast("Reminder times updated"); } catch (e) { toast("Couldn't update", e.message || ""); } });
+      if (off) off.addEventListener("click", async () => {
+        try { const reg = await navigator.serviceWorker.ready; const sub = await reg.pushManager.getSubscription(); if (sub) { await sb.from("push_subs").delete().eq("endpoint", sub.endpoint); await sub.unsubscribe(); } } catch (e) { /* ignore */ }
+        S.settings.pushOn = false; save(); render(); toast("Reminders off");
+      });
+    }
+    async function refreshPushTimes() { if (user && S.settings.pushOn && pushSupported() && Notification.permission === "granted") { try { await subscribe(); } catch (e) { /* ignore */ } } }
+
+    return { init, queuePush, pull, renderAccount, renderLeaderboard, signOut, refreshPushTimes, get user() { return user; }, enabled };
+  })();
+
   // ---------------------------------------------------------------- boot
   render();
-  setTimeout(maybeAskWater, 800);
+  if (/[?&]water=1/.test(location.search)) { history.replaceState(null, "", location.pathname); setTimeout(() => S.profile && openWaterModal(), 600); }
+  else setTimeout(maybeAskWater, 800);
+  Cloud.init().then(() => { if (Cloud.user) render(); }).catch(() => {});
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") {
       if (render._day !== dayKey()) render._day = dayKey();
       if (!$("#modal-root").children.length && S.profile) render();
       setTimeout(maybeAskWater, 400);
+      if (Cloud.user) Cloud.pull().catch(() => {});
     }
   });
   if ("serviceWorker" in navigator && location.protocol === "https:") {

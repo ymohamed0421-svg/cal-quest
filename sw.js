@@ -1,6 +1,6 @@
 // Offline support: keep the app's own files cached; food search always goes to the network.
-const CACHE = "calquest-v4";
-const SHELL = ["./", "index.html", "styles.css", "app.js", "foods.js", "manifest.webmanifest", "icons/icon-192.png", "icons/apple-touch-icon.png", "vendor/zxing-0.21.3.min.js"];
+const CACHE = "calquest-v5";
+const SHELL = ["./", "index.html", "styles.css", "app.js", "foods.js", "manifest.webmanifest", "icons/icon-192.png", "icons/apple-touch-icon.png", "vendor/zxing-0.21.3.min.js", "config.js", "vendor/supabase-2.118.0.js"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -21,4 +21,22 @@ self.addEventListener("fetch", (e) => {
       return res;
     }).catch(() => caches.match(req, { ignoreSearch: true }).then((r) => r || caches.match("index.html")))
   );
+});
+
+// Water reminder pushes (sent by the GitHub Action in .github/workflows/water-reminders.yml)
+self.addEventListener("push", (e) => {
+  let data = {};
+  try { data = e.data ? e.data.json() : {}; } catch (err) { data = { body: e.data && e.data.text() }; }
+  e.waitUntil(self.registration.showNotification(data.title || "💧 Water check-in", {
+    body: data.body || "How many bottles did you drink? Tap to log it.",
+    icon: "icons/icon-192.png", badge: "icons/icon-192.png", tag: "water", data: { url: data.url || "./?water=1" },
+  }));
+});
+self.addEventListener("notificationclick", (e) => {
+  e.notification.close();
+  const url = new URL((e.notification.data && e.notification.data.url) || "./?water=1", self.registration.scope).href;
+  e.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((list) => {
+    for (const c of list) { if ("navigate" in c) { return c.focus().then(() => c.navigate(url)); } }
+    return self.clients.openWindow(url);
+  }));
 });
