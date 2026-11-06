@@ -180,6 +180,7 @@
     const cleared = doneMain === main.length;
     let xp = QUESTS.reduce((a, q) => a + (out[q.id].state === "done" ? q.xp : 0), 0);
     if (cleared) xp += CLEAR_BONUS;
+    if (d.gym && d.gym.status === "went") xp += GYM_XP;
     return { q: out, overall, cleared, xp, doneMain, mainCount: main.length };
   }
 
@@ -248,6 +249,7 @@
       let all = true; for (let i = 0; i < 7; i++) { const k = addDays(w, i); if (!S.days[k] || !questState(k).cleared) all = false; }
       if (all) st.perfectWeek = true;
     });
+    const g = gymStats(); st.gymDays = g.total; st.gymWeek = g.bestWeek; st.gymBest = g.best; st.prs = g.prs;
     st.best = bestStreak(); st.level = levelFromXP(totalXP()); st.weighIns = Object.keys(S.weights || {}).length; st.meals = (S.meals || []).length;
     return st;
   }
@@ -268,6 +270,10 @@
     ["redeem", "🛡️", "Redeemed", "Complete a penalty quest", (s) => s.redeemed >= 1],
     ["lvl5", "🌀", "Rising Star", "Reach level 5", (s) => s.level >= 5],
     ["lvl10", "💠", "Veteran", "Reach level 10", (s) => s.level >= 10],
+    ["gym1", "🏋️", "Gym Rat", "Log your first workout", (s) => s.gymDays >= 1],
+    ["gymweek", "💪", "Iron Week", "5 workouts in one week", (s) => s.gymWeek >= 5],
+    ["gym7", "🦾", "Iron Will", "7-day gym streak", (s) => s.gymBest >= 7],
+    ["pr", "🏆", "New PR", "Beat your best on a lift", (s) => s.prs >= 1],
   ];
   function availableTitles(L) {
     const t = TITLES.filter(([lv]) => L >= lv).map(([, n]) => n);
@@ -330,6 +336,7 @@
     quest: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2l3 6 6 1-4.5 4.5 1 6.5L12 17l-5.5 3 1-6.5L3 9l6-1z"/></svg>',
     food: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M7 2v9M4 2v5a3 3 0 006 0V2M7 11v11M17 2c-2 0-3 3-3 7s1 5 3 5v8"/></svg>',
     water: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2.5S5 10 5 14.5a7 7 0 0014 0C19 10 12 2.5 12 2.5z"/></svg>',
+    gym: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 7v10M3 9v6M18 7v10M21 9v6M6 12h12"/></svg>',
     stats: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
     player: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="8" r="4"/><path d="M4 21c1-4 4-6 8-6s7 2 8 6"/></svg>',
   };
@@ -360,7 +367,7 @@
       '<div class="xptext"><span>XP ' + fmt(xp - start) + " / " + fmt(next - start) + '</span><span>Total ' + fmt(xp) + ' XP</span></div></div>' +
       '</header><main id="view"></main></div>' +
       '<nav class="nav">' +
-      ["quest", "food", "water", "stats", "player"].map((t) => '<button data-tab="' + t + '" class="' + (tab === t ? "active" : "") + '">' + ICON[t] + t.charAt(0).toUpperCase() + t.slice(1) + "</button>").join("") +
+      ["quest", "food", "water", "gym", "stats", "player"].map((t) => '<button data-tab="' + t + '" class="' + (tab === t ? "active" : "") + '">' + ICON[t] + t.charAt(0).toUpperCase() + t.slice(1) + "</button>").join("") +
       "</nav>";
     $$(".nav button").forEach((b) => b.addEventListener("click", () => { tab = b.dataset.tab; if (tab === "food") foodDay = dayKey(); render(); window.scrollTo(0, 0); }));
     const v = $("#view");
@@ -368,6 +375,7 @@
     else if (tab === "food") renderFood(v);
     else if (tab === "water") renderWater(v);
     else if (tab === "stats") renderStats(v);
+    else if (tab === "gym") renderGym(v);
     else renderPlayer(v);
     checkCelebrations(L);
   }
@@ -1236,6 +1244,147 @@
       if (confirm("Erase all your data on this phone? This can't be undone.")) { localStorage.removeItem(STORE_KEY); S = fresh(); primeSnap(); tab = "quest"; if (typeof Cloud !== "undefined") Cloud.signOut(true); render(); }
     });
   }
+  // ---------------------------------------------------------------- GYM
+  const GYM_XP = 100;
+  const MUSCLES = ["Chest", "Back", "Shoulders", "Biceps", "Triceps", "Legs", "Glutes", "Abs", "Cardio", "Full body"];
+  const SPLITS = { Push: ["Chest", "Shoulders", "Triceps"], Pull: ["Back", "Biceps"], Legs: ["Legs", "Glutes"], Upper: ["Chest", "Back", "Shoulders", "Biceps", "Triceps"], "Full body": ["Full body"] };
+  const COMMON_LIFTS = ["Bench press", "Incline dumbbell press", "Chest fly", "Push-ups", "Pull-ups", "Lat pulldown", "Barbell row", "Seated cable row", "Deadlift",
+    "Overhead press", "Lateral raise", "Rear delt fly", "Bicep curl", "Hammer curl", "Tricep pushdown", "Skull crushers", "Dips", "Squat", "Leg press",
+    "Romanian deadlift", "Leg curl", "Leg extension", "Calf raise", "Hip thrust", "Lunges", "Plank", "Crunches", "Treadmill", "Stair climber", "Bike"];
+  let gymDay = null;
+  function gymOf(k) { const d = peekDay(k); return d.gym || null; }
+  function gymStreak() {
+    // A workout day adds 1. A rest day keeps the streak alive (max 2 rest days in a row). A blank day breaks it.
+    let k = dayKey(), n = 0, rests = 0;
+    const g0 = gymOf(k); if (!g0 || !g0.status) k = addDays(k, -1); // today not logged yet: don't break
+    for (let i = 0; i < 400; i++) {
+      const g = gymOf(k);
+      if (g && g.status === "went") { n++; rests = 0; }
+      else if (g && g.status === "rest" && rests < 2) { rests++; }
+      else break;
+      k = addDays(k, -1);
+    }
+    return n;
+  }
+  function liftBest(name, beforeK) {
+    let best = null;
+    Object.keys(S.days).forEach((k) => {
+      if (beforeK && k >= beforeK) return;
+      const g = S.days[k].gym; if (!g || !g.ex) return;
+      g.ex.forEach((e) => { if (e.name.toLowerCase() !== name.toLowerCase()) return; (e.sets || []).forEach((st) => { const w = +st.w || 0, r = +st.r || 0; if (!best || w > best.w || (w === best.w && r > best.r)) best = { w, r, k }; }); });
+    });
+    return best;
+  }
+  function lastTime(name, beforeK) {
+    const keys = Object.keys(S.days).filter((k) => k < beforeK && S.days[k].gym && S.days[k].gym.ex).sort().reverse();
+    for (const k of keys) { const e = S.days[k].gym.ex.find((x) => x.name.toLowerCase() === name.toLowerCase()); if (e) return { k, e }; }
+    return null;
+  }
+  function gymStats() {
+    const keys = Object.keys(S.days).filter((k) => S.days[k].gym && S.days[k].gym.status === "went");
+    const byWeek = {}; keys.forEach((k) => (byWeek[weekStart(k)] = (byWeek[weekStart(k)] || 0) + 1));
+    let prs = 0;
+    keys.forEach((k) => (S.days[k].gym.ex || []).forEach((e) => { const prev = liftBest(e.name, k); if (prev && (e.sets || []).some((st) => (+st.w || 0) > prev.w)) prs++; }));
+    let best = 0, run = 0, rests = 0; const all = Object.keys(S.days).sort();
+    if (all.length) for (let k = all[0]; k <= dayKey(); k = addDays(k, 1)) {
+      const g = gymOf(k);
+      if (g && g.status === "went") { run++; rests = 0; best = Math.max(best, run); }
+      else if (g && g.status === "rest" && rests < 2) rests++;
+      else if (k !== dayKey()) { run = 0; rests = 0; }
+    }
+    return { total: keys.length, bestWeek: Math.max(0, ...Object.values(byWeek)), best, prs };
+  }
+  function setLabel(st, unit) { return (+st.w ? r1(st.w) + " " + unit + " × " : "") + (+st.r || 0) + (+st.w ? "" : " reps"); }
+  function exSummary(e, unit) {
+    const sets = (e.sets || []).filter((x) => +x.r || +x.w);
+    if (!sets.length) return esc(e.name);
+    const same = sets.every((x) => x.w === sets[0].w && x.r === sets[0].r);
+    return "<b>" + esc(e.name) + "</b> " + (same ? sets.length + "×" + (+sets[0].r || 0) + (+sets[0].w ? " @ " + r1(sets[0].w) + " " + unit : "") : sets.map((x) => setLabel(x, unit)).join(", "));
+  }
+  function renderGym(v) {
+    const today = dayKey(), k = gymDay || today, isToday = k === today, unit = S.profile.units === "imperial" ? "lb" : "kg";
+    const d = getDay(k); d.gym = d.gym || { status: null, muscles: [], ex: [], notes: "" };
+    const g = d.gym, gs = gymStreak();
+    const week = []; const ws = weekStart(today);
+    for (let i = 0; i < 7; i++) { const kk = addDays(ws, i), gg = gymOf(kk); week.push('<div class="' + (kk === today ? "now" : "") + '"><b>' + (gg && gg.status === "went" ? "💪" : gg && gg.status === "rest" ? "😴" : kk < today ? "✕" : "·") + "</b><span>" + "MTWTFSS"[i] + "</span></div>"); }
+    const thisWeek = Array.from({ length: 7 }, (_, i) => gymOf(addDays(ws, i))).filter((x) => x && x.status === "went").length;
+    const past = Object.keys(S.days).filter((kk) => kk !== k && S.days[kk].gym && S.days[kk].gym.status === "went").sort().reverse().slice(0, 10);
+    const label = isToday ? "Today" : k === addDays(today, -1) ? "Yesterday" : keyToDate(k).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+    const suggestions = Array.from(new Set(Object.values(S.days).flatMap((dd) => (dd.gym && dd.gym.ex ? dd.gym.ex.map((e) => e.name) : [])).concat(COMMON_LIFTS)));
+    v.innerHTML =
+      '<section class="panel">' + corners() + '<h1 class="panel-title">Gym</h1>' +
+      '<div class="gym-streak"><div class="big-pct' + (gs ? " full" : "") + '">' + gs + '</div><div class="note" style="margin:0">day gym streak 🔥</div></div>' +
+      '<div class="hits gweek">' + week.join("") + "</div>" +
+      '<p class="explain" style="text-align:center">' + thisWeek + " workout" + (thisWeek === 1 ? "" : "s") + " this week · each workout = +" + GYM_XP + " XP. Rest days (😴) keep your streak, up to 2 in a row.</p></section>" +
+
+      '<div class="daynav"><button class="btn sm ghost" id="g-prev">‹ Prev</button><div class="d">' + esc(label) + '</div><button class="btn sm ghost" id="g-next" ' + (isToday ? "disabled" : "") + ">Next ›</button></div>" +
+      '<div class="row" style="margin-top:12px"><button class="btn ' + (g.status === "went" ? "good" : "") + '" id="g-went">💪 I went' + (g.status === "went" ? " ✓" : "") + '</button><button class="btn ' + (g.status === "rest" ? "primary" : "") + '" id="g-rest">😴 Rest day' + (g.status === "rest" ? " ✓" : "") + "</button></div>" +
+      (g.status === "went" ?
+        '<div class="h2">What did you hit?</div><div class="chips">' + Object.keys(SPLITS).map((sp) => '<button class="chip split" data-split="' + sp + '">' + sp + "</button>").join("") + "</div>" +
+        '<div class="chips" style="margin-top:8px">' + MUSCLES.map((m) => '<button class="chip' + (g.muscles.includes(m) ? " on" : "") + '" data-mus="' + m + '">' + m + "</button>").join("") + "</div>" +
+        '<div class="h2">Exercises</div>' +
+        (g.ex.length ? g.ex.map((e, i) => {
+          const lt = lastTime(e.name, k), pb = liftBest(e.name, k);
+          return '<section class="chart-card ex" data-ex="' + i + '"><div class="chart-h"><b>' + esc(e.name) + '</b><button class="x" data-delex="' + i + '" aria-label="Remove exercise">×</button></div>' +
+            (lt ? '<div class="note" style="margin:0 0 6px">Last time (' + esc(keyToDate(lt.k).toLocaleDateString(undefined, { month: "short", day: "numeric" })) + "): " + exSummary(lt.e, unit) + (pb ? " · Best: " + setLabel(pb, unit) : "") + "</div>" : "") +
+            '<div class="sets">' + (e.sets || []).map((st, j) => '<div class="setrow"><span>' + (j + 1) + '</span><input type="number" inputmode="decimal" placeholder="' + unit + '" value="' + (st.w === "" || st.w == null ? "" : st.w) + '" data-w="' + j + '"><span>×</span><input type="number" inputmode="numeric" placeholder="reps" value="' + (st.r === "" || st.r == null ? "" : st.r) + '" data-r="' + j + '"><button class="x" data-delset="' + j + '" aria-label="Remove set">×</button></div>').join("") + "</div>" +
+            '<button class="btn sm ghost block" data-addset="' + i + '" style="margin-top:6px">+ Add set</button></section>';
+        }).join("") : '<div class="empty">No exercises yet. Add what you did below.</div>') +
+        '<div class="row" style="margin-top:10px"><input id="g-exname" list="g-lifts" placeholder="Exercise, e.g. Bench press" autocapitalize="sentences"><button class="btn primary" id="g-addex" style="flex:0 0 90px">Add</button></div>' +
+        '<datalist id="g-lifts">' + suggestions.map((x) => '<option value="' + esc(x) + '">').join("") + "</datalist>" +
+        '<label class="f" for="g-notes">Notes</label><input id="g-notes" value="' + esc(g.notes || "") + '" placeholder="How did it feel?">'
+        : "") +
+      '<div class="h2">Past workouts</div>' +
+      (past.length ? past.map((kk) => {
+        const pg = S.days[kk].gym;
+        const dl = kk === addDays(today, -1) ? "Yesterday" : keyToDate(kk).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+        return '<section class="chart-card"><div class="chart-h"><b>' + esc(dl) + "</b><span>" + esc((pg.muscles || []).join(" · ") || "Workout") + "</span></div>" +
+          ((pg.ex || []).length ? '<div class="pastex">' + pg.ex.map((e) => "<div>" + exSummary(e, unit) + "</div>").join("") + "</div>" : "") +
+          (pg.notes ? '<p class="note" style="margin:6px 0 0">' + esc(pg.notes) + "</p>" : "") +
+          (g.status === "went" && (pg.ex || []).length ? '<button class="btn sm ghost" data-copy="' + kk + '" style="margin-top:8px">Copy to ' + esc(label.toLowerCase()) + "</button>" : "") + "</section>";
+      }).join("") : '<div class="empty">Your workouts will show up here.</div>');
+
+    const saveG = (rerender) => { save(); if (rerender) render(); };
+    $("#g-prev").addEventListener("click", () => { gymDay = addDays(k, -1); render(); });
+    $("#g-next").addEventListener("click", () => { if (!isToday) { gymDay = addDays(k, 1); if (gymDay === today) gymDay = null; render(); } });
+    $("#g-went").addEventListener("click", () => { const was = g.status; g.status = g.status === "went" ? null : "went"; saveG(true); if (g.status === "went" && was !== "went") toast("💪 Workout logged", "+" + GYM_XP + " XP · streak " + gymStreak(), "good"); });
+    $("#g-rest").addEventListener("click", () => {
+      if (g.status !== "rest") { const r1d = gymOf(addDays(k, -1)), r2d = gymOf(addDays(k, -2)); if (r1d && r1d.status === "rest" && r2d && r2d.status === "rest") { toast("3 rest days in a row?", "That one won't save your streak, but it's logged"); } }
+      g.status = g.status === "rest" ? null : "rest"; saveG(true);
+    });
+    if (g.status !== "went") return;
+    $$("[data-split]", v).forEach((b) => b.addEventListener("click", () => { g.muscles = SPLITS[b.dataset.split].slice(); saveG(true); }));
+    $$("[data-mus]", v).forEach((b) => b.addEventListener("click", () => { const m = b.dataset.mus; g.muscles = g.muscles.includes(m) ? g.muscles.filter((x) => x !== m) : g.muscles.concat(m); saveG(true); }));
+    $("#g-addex").addEventListener("click", () => {
+      const name = $("#g-exname").value.trim(); if (!name) return;
+      const lt = lastTime(name, k);
+      g.ex.push({ name: name.slice(0, 40), sets: lt ? lt.e.sets.map((x) => ({ w: x.w, r: x.r })) : [{ w: "", r: "" }] });
+      saveG(true);
+      if (lt) toast("Copied last time's sets", "Change the numbers to what you did today");
+    });
+    $("#g-notes").addEventListener("change", (e) => { g.notes = e.target.value.slice(0, 200); saveG(false); });
+    $$(".ex", v).forEach((card) => {
+      const e = g.ex[+card.dataset.ex];
+      $$("[data-w]", card).forEach((inp) => inp.addEventListener("change", () => { e.sets[+inp.dataset.w].w = inp.value === "" ? "" : Math.max(0, +inp.value); checkPR(e, unit, k); saveG(false); }));
+      $$("[data-r]", card).forEach((inp) => inp.addEventListener("change", () => { e.sets[+inp.dataset.r].r = inp.value === "" ? "" : Math.max(0, Math.round(+inp.value)); saveG(false); }));
+      $$("[data-delset]", card).forEach((b) => b.addEventListener("click", () => { e.sets.splice(+b.dataset.delset, 1); saveG(true); }));
+    });
+    $$("[data-addset]", v).forEach((b) => b.addEventListener("click", () => { const e = g.ex[+b.dataset.addset], last = e.sets[e.sets.length - 1] || { w: "", r: "" }; e.sets.push({ w: last.w, r: last.r }); saveG(true); }));
+    $$("[data-delex]", v).forEach((b) => b.addEventListener("click", () => { if (confirm("Remove " + g.ex[+b.dataset.delex].name + "?")) { g.ex.splice(+b.dataset.delex, 1); saveG(true); } }));
+    $$("[data-copy]", v).forEach((b) => b.addEventListener("click", () => {
+      const src = S.days[b.dataset.copy].gym;
+      src.ex.forEach((e) => { if (!g.ex.some((x) => x.name.toLowerCase() === e.name.toLowerCase())) g.ex.push({ name: e.name, sets: e.sets.map((x) => ({ w: x.w, r: x.r })) }); });
+      if (!g.muscles.length) g.muscles = (src.muscles || []).slice();
+      saveG(true); toast("Workout copied", "Update the weights and reps");
+    }));
+  }
+  function checkPR(e, unit, k) {
+    const prev = liftBest(e.name, k); if (!prev) return;
+    const top = Math.max(0, ...e.sets.map((x) => +x.w || 0));
+    const key = k + ":pr:" + e.name.toLowerCase();
+    if (top > prev.w && !S.celebrated[key]) { S.celebrated[key] = 1; toast("🏆 New PR: " + e.name, r1(top) + " " + unit + " (old best " + r1(prev.w) + ")", "good"); }
+  }
+
   // ---------------------------------------------------------------- STATS
   let statRange = 7;
   function renderStats(v) {
@@ -1509,7 +1658,7 @@
         if (me) {
           const k = dayKey(), qs = questState(k), xp = totalXP(), L = levelFromXP(xp);
           await sb.from("players").update({ level: L, xp, streak: streak(), title: currentTitle(L), theme: S.settings.theme || "azure", stats_day: k,
-            today_pct: Math.round(qs.overall * 100), cleared_today: qs.cleared, boss_dmg: bossState(weekStart(k)).dmg, updated_at: now }).eq("id", user.id);
+            today_pct: Math.round(qs.overall * 100), cleared_today: qs.cleared, boss_dmg: bossState(weekStart(k)).dmg, gym_streak: gymStreak(), updated_at: now }).eq("id", user.id);
         }
         lastSync = new Date();
         const el = $("#acct-sync"); if (el) el.textContent = "Last synced " + lastSync.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
@@ -1580,12 +1729,12 @@
     async function fetchBoard() {
       const f = await sb.from("follows").select("followee").eq("follower", user.id);
       const ids = [user.id].concat((f.data || []).map((x) => x.followee));
-      const { data } = await sb.from("players").select("id, username, level, xp, streak, title, stats_day, today_pct, cleared_today").in("id", ids);
+      const { data } = await sb.from("players").select("id, username, level, xp, streak, gym_streak, title, stats_day, today_pct, cleared_today").in("id", ids);
       return (data || []).sort((a, b) => b.xp - a.xp);
     }
     function boardHTML(rows) {
       const k = dayKey();
-      return rows.map((r, i) => '<div class="lb-row' + (r.id === user.id ? " me" : "") + '"><b class="rk">' + (i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : i + 1) + '</b><div class="who">' + esc(r.username) + "<small>Lv " + r.level + " · " + esc(r.title) + '</small></div><div class="lb-st">' + (r.streak ? "🔥" + r.streak : "") +
+      return rows.map((r, i) => '<div class="lb-row' + (r.id === user.id ? " me" : "") + '"><b class="rk">' + (i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : i + 1) + '</b><div class="who">' + esc(r.username) + "<small>Lv " + r.level + " · " + esc(r.title) + '</small></div><div class="lb-st">' + (r.streak ? "🔥" + r.streak : "") + (r.gym_streak ? " 🏋️" + r.gym_streak : "") +
         '<small>' + (r.stats_day === k ? (r.cleared_today ? "✓ cleared" : r.today_pct + "% today") : "–") + "</small></div>" +
         (r.id !== user.id ? '<button class="x" data-unf="' + esc(r.id) + '" aria-label="Remove friend">×</button>' : "<span></span>") + "</div>").join("");
     }

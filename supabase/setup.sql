@@ -14,6 +14,7 @@ create table if not exists public.players (
   today_pct int not null default 0,
   cleared_today boolean not null default false,
   boss_dmg int not null default 0,
+  gym_streak int not null default 0,
   updated_at timestamptz not null default now()
 );
 create unique index if not exists players_username_lower on public.players (lower(username));
@@ -63,3 +64,6 @@ create table if not exists public.push_subs (
 alter table public.push_subs enable row level security;
 drop policy if exists "own push subs" on public.push_subs;
 create policy "own push subs" on public.push_subs for all to authenticated using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- (added later) make sure older setups have the gym streak column
+alter table public.players add column if not exists gym_streak int not null default 0;

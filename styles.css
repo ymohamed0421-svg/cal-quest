@@ -153,11 +153,11 @@ input:focus, select:focus { border-color: var(--line); box-shadow: var(--glow); 
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
   background: linear-gradient(180deg, rgba(2,8,20,.6), rgba(2,8,20,.98) 40%);
   padding: 10px 12px calc(var(--safe-bottom) + 10px);
-  display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; max-width: 520px; margin: 0 auto;
+  display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; max-width: 520px; margin: 0 auto;
 }
 .nav button {
   background: rgba(6, 22, 48, .9); border: 1px solid var(--line-dim); padding: 8px 4px; font-weight: 700; font-size: 13px;
-  letter-spacing: .3px; text-transform: uppercase; display: flex; flex-direction: column; align-items: center; gap: 3px; min-height: 52px; font-size: 11px;
+  letter-spacing: .3px; text-transform: uppercase; display: flex; flex-direction: column; align-items: center; gap: 3px; min-height: 52px; font-size: 10px; padding-left: 2px; padding-right: 2px;
 }
 .nav button svg { width: 22px; height: 22px; }
 .nav button.active { border-color: var(--line); box-shadow: var(--glow); color: #fff; text-shadow: var(--glow); }
@@ -353,3 +353,15 @@ details.guide code { background: rgba(52,200,255,.12); padding: 1px 5px; border-
 .lb-row small { display: block; font-weight: 400; font-size: 11px; color: var(--muted); }
 .lb-st { text-align: right; font-weight: 700; }
 .lb-row.me .who { color: var(--line); text-shadow: var(--glow); }
+
+/* ---------- gym ---------- */
+.gym-streak { text-align: center; margin-top: 8px; }
+.gweek b { font-size: 18px; }
+.gweek .now { border: 1px solid var(--line-dim); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { background: rgba(2,10,24,.7); border: 1px solid var(--line-dim); padding: 7px 11px; font-size: 13px; font-weight: 600; border-radius: 16px; }
+.chip.on { border-color: var(--line); background: var(--line-dim); box-shadow: var(--glow); color: #fff; }
+.chip.split { border-style: dashed; color: var(--muted); }
+.setrow { display: grid; grid-template-columns: 20px 1fr 14px 1fr 32px; gap: 6px; align-items: center; margin: 4px 0; color: var(--muted); }
+.setrow input { padding: 9px; font-size: 16px; }
+.pastex div { font-size: 14px; padding: 3px 0; color: #cfe6f7; }
