@@ -624,14 +624,15 @@
           '<ol class="explain" style="padding-left:20px">' +
           '<li>Open <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" style="color:var(--line)">aistudio.google.com/apikey</a> and sign in with any Google account.</li>' +
           "<li>Tap <b>Create API key</b>. If it asks, accept the terms and pick or create any project.</li>" +
-          "<li>Tap <b>copy</b> next to the key. It starts with <b>AIza</b>.</li>" +
+          "<li>Tap the <b>copy</b> icon next to your key to copy the whole thing.</li>" +
           "<li>Come back here, paste it below, tap Save.</li></ol>" +
-          '<label class="f" for="gk">Your Google AI key</label><input id="gk" placeholder="AIza…" autocomplete="off" autocapitalize="off" spellcheck="false">' +
+          '<label class="f" for="gk">Your Google AI key</label><input id="gk" placeholder="Paste your key here" autocomplete="off" autocapitalize="off" spellcheck="false">' +
           '<button class="btn primary block" style="margin-top:12px" id="gk-save">Save key</button>' +
           '<p class="note">The key is saved only on this phone. Don\'t share it. It\'s free for personal use; Google may use free-tier photos to improve its AI.</p>';
         $("#gk-save", body).addEventListener("click", () => {
           const v = $("#gk", body).value.trim();
-          if (!/^AIza[\w-]{20,}$/.test(v)) { toast("That doesn't look like a Google AI key", "It should start with AIza"); return; }
+          // Classic keys start with "AIza"; Google also issues newer formats, so accept any long key and let Google check it.
+          if (!/^[\w.\-]{20,}$/.test(v)) { toast("That doesn't look like a Google AI key", "Copy the whole key, with no spaces"); return; }
           S.settings.geminiKey = v; save(); drawPhoto();
         });
         return;
