@@ -589,7 +589,7 @@
       try {
         const txt = await navigator.clipboard.readText();
         const num = (txt.match(/\d[\d,\.]*/) || [""])[0].replace(/[,\.](?=\d{3}\b)/g, "").split(".")[0];
-        if (!num) { toast("No number found on clipboard", "Run the Copy Steps shortcut first"); return; }
+        if (!num) { toast("No steps found on clipboard", "Run Copy Steps first. Right after midnight it copies nothing because today has 0 steps."); return; }
         $("#st-in", bg).value = num; save1(num);
       } catch (e) { toast("Couldn't read the clipboard", "Tap the box, then tap Paste instead"); $("#st-in", bg).focus(); }
     });
@@ -1198,7 +1198,7 @@
       "<li>Search and add <code>Calculate Statistics</code>. Set it to <b>Sum</b>.</li>" +
       "<li>Search and add <code>Round Number</code>.</li>" +
       "<li>Search and add <code>Copy to Clipboard</code>.</li>" +
-      "<li>Tap the name at the top, call it <code>Copy Steps</code>, tap <b>Done</b>. The first time it runs, tap <b>Allow</b> for Health.</li></ol>" +
+      "<li>Tap the name at the top, call it <code>Copy Steps</code>, tap <b>Done</b>. The first time it runs, tap <b>Allow</b> for Health.</li></ol><p class=\"note\">If you have 0 steps so far today (like just after midnight), the shortcut copies nothing. That's normal.</p>" +
       "<p><b>Every day:</b> run <b>Copy Steps</b> (tip: add it as a widget), open Cal Quest, tap <b>Steps</b> → <b>Paste from Health</b>.</p></div></details>" +
 
       '<details class="guide"><summary>📲 Install on iPhone & share</summary><div class="gb"><ol>' +
