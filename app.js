@@ -499,6 +499,7 @@
     const url = "https://api.nal.usda.gov/fdc/v1/foods/search?api_key=" + encodeURIComponent(key) + "&query=" + encodeURIComponent(q) +
       "&pageSize=15&dataType=" + encodeURIComponent("Survey (FNDDS),SR Legacy,Foundation");
     const res = await withTimeout(url);
+    if (res.status === 429) { const e = new Error("USDA limit"); e.limit = true; throw e; }
     if (!res.ok) throw new Error("USDA " + res.status);
     const js = await res.json();
     return (js.foods || []).map((f) => {
@@ -519,12 +520,21 @@
     }).filter(Boolean);
   }
   async function searchOFF(q) {
-    const url = "https://world.openfoodfacts.org/cgi/search.pl?search_terms=" + encodeURIComponent(q) +
-      "&search_simple=1&action=process&json=1&page_size=15&fields=code,product_name,brands,nutriments,serving_size,serving_quantity";
-    const res = await withTimeout(url, 10000);
-    if (!res.ok) throw new Error("OFF " + res.status);
-    const js = await res.json();
-    return (js.products || []).map(offToFood).filter(Boolean);
+    const fields = "code,product_name,brands,nutriments,serving_size,serving_quantity";
+    const urls = [
+      "https://search.openfoodfacts.org/search?q=" + encodeURIComponent(q) + "&page_size=15&fields=" + fields,
+      "https://world.openfoodfacts.org/cgi/search.pl?search_terms=" + encodeURIComponent(q) + "&search_simple=1&action=process&json=1&page_size=15&fields=" + fields,
+    ];
+    let lastErr;
+    for (const url of urls) {
+      try {
+        const res = await withTimeout(url, 9000);
+        if (!res.ok) { lastErr = new Error("Open Food Facts " + res.status); continue; }
+        const js = await res.json();
+        return (js.hits || js.products || []).map(offToFood).filter(Boolean);
+      } catch (e) { lastErr = e; }
+    }
+    throw lastErr || new Error("Open Food Facts unavailable");
   }
   function offToFood(p) {
     const n = p.nutriments || {};
@@ -537,6 +547,7 @@
     const sq = Number(p.serving_quantity);
     return { name: p.product_name, brand: (p.brands || "").split(",")[0], src: "BRAND", per100, servingG: sq > 0 ? sq : 100, servingLabel: sq > 0 ? (p.serving_size || r0(sq) + " g") : "100 g" };
   }
+  const SEARCH_CACHE = new Map();
   function titleCase(s) { return s.length > 3 && s === s.toUpperCase() ? s.charAt(0) + s.slice(1).toLowerCase() : s; }
 
   function openAddFood(meal = guessMeal(), k = dayKey()) {
@@ -599,7 +610,7 @@
       const qIn = $("#af-q", body);
       showList("");
       let timer;
-      qIn.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => showList(qIn.value.trim()), 250); });
+      qIn.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => showList(qIn.value.trim()), 700); });
       qIn.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); qIn.blur(); showList(qIn.value.trim(), true); } });
       setTimeout(() => qIn.focus(), 50);
     }
@@ -619,18 +630,48 @@
         .map((f) => ({ f, s: matchScore(f.name + " " + (f.brand || ""), q) })).filter((x) => x.s > 0)
         .sort((a, b) => b.s - a.s).map((x) => x.f);
       const seen = new Set(); results = local.filter((f) => { const id = f.src + f.name; if (seen.has(id)) return false; seen.add(id); return true; }).slice(0, 8);
+      const local1 = results.slice();
+      const aiBtn = () => S.settings.geminiKey ? '<button class="btn block" id="af-ai" style="margin-top:8px">✨ Ask AI: nutrition for “' + esc(q) + '”</button>' : "";
+      const bindAI = () => { const b = $("#af-ai", box); if (b) b.addEventListener("click", () => askAI(q, box)); };
+      if (q.length < 3) { box.innerHTML = results.map(resHTML).join(""); bindRes(box); return; }
       box.innerHTML = results.map(resHTML).join("") + '<div class="loading" id="af-load">Searching online</div>';
       bindRes(box);
-      if (q.length < 2) { $("#af-load", box).remove(); return; }
-      Promise.allSettled([searchUSDA(q), searchOFF(q)]).then(([u, o]) => {
-        if (seq !== searchSeq) return;
-        const add = [].concat(u.status === "fulfilled" ? u.value.slice(0, 10) : [], o.status === "fulfilled" ? o.value.slice(0, 10) : []);
-        results = results.concat(add);
-        const failed = u.status === "rejected" && o.status === "rejected";
-        box.innerHTML = results.map(resHTML).join("") +
-          (failed ? '<div class="empty">Online search is unavailable right now. Try again, or use Quick add.</div>' : !results.length ? '<div class="empty">No results. Try other words, or use Quick add.</div>' : "");
-        bindRes(box);
+      const ck = q.toLowerCase();
+      const cached = SEARCH_CACHE.get(ck);
+      const work = cached ? Promise.resolve(cached) : Promise.allSettled([searchUSDA(q), searchOFF(q)]).then(([u, o]) => {
+        const r = { usda: u.status === "fulfilled" ? u.value : null, off: o.status === "fulfilled" ? o.value : null, uErr: u.reason, oErr: o.reason };
+        if (r.usda || r.off) SEARCH_CACHE.set(ck, r);
+        return r;
       });
+      work.then((r) => {
+        if (seq !== searchSeq) return;
+        results = local1.concat((r.usda || []).slice(0, 10), (r.off || []).slice(0, 10));
+        const failed = !r.usda && !r.off;
+        let msg = "";
+        if (failed) msg = '<div class="empty">Online food search isn\'t answering right now' + (r.uErr && r.uErr.limit ? " (the free USDA search hit its hourly limit)" : "") + "." +
+          (S.settings.geminiKey ? " Use ✨ Ask AI below, or Quick add." : " Try again in a few minutes, or use Quick add.") + "</div>";
+        else if (!results.length) msg = '<div class="empty">No results. Try other words.</div>';
+        box.innerHTML = results.map(resHTML).join("") + msg + aiBtn();
+        bindRes(box); bindAI();
+      });
+    }
+    // Ask Gemini (with Google Search) for nutrition of whatever was typed: restaurant & branded foods.
+    async function askAI(q, box) {
+      box.innerHTML = '<div class="loading">Asking AI about “' + esc(q) + '”</div>';
+      try {
+        const d = await gemini([{ text:
+          "Give the nutrition facts for one typical serving of: \"" + q + "\". If it's a branded or restaurant item, use the official published nutrition facts (search the web). " +
+          "Return JSON only: {\"name\":string,\"brand\":string,\"serving\":string,\"grams\":number,\"kcal\":number,\"protein_g\":number,\"carbs_g\":number,\"fat_g\":number,\"fiber_g\":number,\"sugar_g\":number,\"sat_fat_g\":number,\"sodium_mg\":number}" }], { search: true, fallbackNoSearch: true });
+        const x = Array.isArray(d) ? d[0] : d;
+        if (!x || !(+x.kcal > 0)) throw new Error("The AI couldn't find that food. Try other words.");
+        const g = +x.grams > 0 ? +x.grams : 100;
+        const per100 = {};
+        const map = { kcal: "kcal", p: "protein_g", c: "carbs_g", f: "fat_g", fiber: "fiber_g", sugar: "sugar_g", sat: "sat_fat_g", sodium: "sodium_mg" };
+        NKEYS.forEach((k) => (per100[k] = map[k] ? ((+x[map[k]] || 0) * 100) / g : 0));
+        openAmount({ name: String(x.name || q).slice(0, 80), brand: String(x.brand || "").slice(0, 60), src: "AI", per100, servingG: g, servingLabel: String(x.serving || "1 serving").slice(0, 60) + (x.grams ? " (" + r0(g) + " g)" : "") });
+      } catch (e) {
+        box.innerHTML = '<div class="err" style="text-align:left">' + esc(e.message || "Something went wrong") + "</div>";
+      }
     }
     // ---- photo → AI estimate
     function drawPhoto() {
@@ -681,8 +722,16 @@
         items.map((it, i) => '<div class="res" data-pi="' + i + '" style="cursor:default"><div style="display:flex;gap:8px;align-items:center"><input class="pi-name" value="' + esc(it.name) + '" style="flex:1;padding:8px">' +
           '<button class="x pi-del" aria-label="Remove">×</button></div><span>' + esc(it.portion || "") +
           (it.label ? ' · <b style="color:var(--good);display:inline;font-size:12px">✓ official label values</b>' : it.packaged ? ' · <b style="color:var(--warn);display:inline;font-size:12px">estimate, check the label</b>' : "") + '</span>' +
+          '<div class="row" style="margin:8px 0 2px">' + [0.5, 1, 1.5, 2].map((m) => '<button class="btn sm ' + (m === 1 ? "primary" : "ghost") + ' pi-m" data-m="' + m + '">' + (m === 0.5 ? "½" : m) + "×</button>").join("") + "</div>" +
           '<div class="row">' + numIn("pi-k", it.kcal, "kcal") + numIn("pi-p", it.p, "prot g") + numIn("pi-c", it.c, "carb g") + numIn("pi-f", it.f, "fat g") + "</div></div>").join("") +
         mealSelect("ph-meal") + '<button class="btn good block" style="margin-top:14px" id="ph-add">Add to log</button>';
+      // portion size buttons: scale the AI's numbers for this item
+      $$(".pi-m", out).forEach((b) => b.addEventListener("click", () => {
+        const row = b.closest(".res"), it = items[+row.dataset.pi], m = +b.dataset.m;
+        it.mult = m;
+        $(".pi-k", row).value = r0(it.kcal * m); $(".pi-p", row).value = r0(it.p * m); $(".pi-c", row).value = r0(it.c * m); $(".pi-f", row).value = r0(it.f * m);
+        $$(".pi-m", row).forEach((x) => { x.classList.toggle("primary", x === b); x.classList.toggle("ghost", x !== b); });
+      }));
       $$(".pi-del", out).forEach((b) => b.addEventListener("click", () => b.closest(".res").remove()));
       $("#ph-add", out).addEventListener("click", () => {
         const rows = $$(".res[data-pi]", out);
@@ -690,7 +739,8 @@
         const meal1 = $("#ph-meal", out).value;
         rows.forEach((row) => {
           const it = items[+row.dataset.pi], g = (c) => Math.max(0, parseFloat($(c, row).value) || 0);
-          const n = { kcal: g(".pi-k"), p: g(".pi-p"), c: g(".pi-c"), f: g(".pi-f"), fiber: it.fiber || 0, sugar: it.sugar || 0, sat: it.sat || 0, sodium: it.sodium || 0, potassium: 0, calcium: 0, iron: 0, vitc: 0 };
+          const mm = it.mult || 1;
+          const n = { kcal: g(".pi-k"), p: g(".pi-p"), c: g(".pi-c"), f: g(".pi-f"), fiber: (it.fiber || 0) * mm, sugar: (it.sugar || 0) * mm, sat: (it.sat || 0) * mm, sodium: (it.sodium || 0) * mm, potassium: 0, calcium: 0, iron: 0, vitc: 0 };
           logFood(k, { name: ($(".pi-name", row).value.trim() || it.name) + (it.label ? "" : " 📷"), amountLabel: it.portion || "1 portion", meal: meal1, n });
         });
         closeModal();
@@ -774,14 +824,18 @@
           method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": key }, body, signal: ctl.signal,
         }).finally(() => clearTimeout(t));
       } catch (e) { throw new Error("Couldn't reach the AI. Check your internet and try again."); }
-      if (res.status === 404) { lastErr = new Error("AI model not available"); continue; }
-      if (res.status === 400 || res.status === 401 || res.status === 403) {
+      if (!res.ok) {
         const txt = await res.text().catch(() => "");
-        if (/API key|API_KEY|PERMISSION|UNAUTHENTICATED/i.test(txt)) { S.settings.geminiKey = ""; save(); throw new Error("Google says that key doesn't work. Close this, tap 📷 Photo again and paste a new key."); }
-        const e = new Error("The AI couldn't read that photo. Try another one."); e.bad = true; throw e;
+        let why = ""; try { why = (JSON.parse(txt).error || {}).message || ""; } catch (e) { why = txt; }
+        why = String(why).slice(0, 160);
+        if ((res.status === 400 || res.status === 401 || res.status === 403) && /API key not valid|API_KEY_INVALID|UNAUTHENTICATED|invalid authentication/i.test(txt)) {
+          S.settings.geminiKey = ""; save();
+          throw new Error("Google says that key doesn't work. Close this, tap 📷 Photo again and paste a new key.");
+        }
+        if (res.status === 429) { lastErr = new Error("You hit the free AI limit for now. Wait a minute and try again, or use Search / ▦ barcode."); lastErr.limit = true; }
+        else lastErr = new Error("The AI had a problem (" + res.status + (why ? ": " + why : "") + "). Try again in a moment.");
+        continue; // try the backup model, which has its own free quota
       }
-      if (res.status === 429) { const e = new Error("You hit the free AI limit for now. Wait a minute and try again, or log it with Search."); e.limit = true; throw e; }
-      if (!res.ok) throw new Error("The AI is busy (" + res.status + "). Try again in a moment.");
       const js = await res.json();
       const cand = (js.candidates || [])[0] || {};
       const text = ((cand.content || {}).parts || []).map((p) => p.text || "").join("");
@@ -789,6 +843,7 @@
       const m = text.match(/[\[{][\s\S]*[\]}]/);
       try { return JSON.parse(m ? m[0] : text); } catch (e) { throw new Error("The AI gave a confusing answer. Try again."); }
     }
+    if (opts.search && opts.fallbackNoSearch && lastErr && !lastErr.limit) return gemini(parts, Object.assign({}, opts, { search: false, fallbackNoSearch: false }));
     throw lastErr || new Error("The AI isn't available right now.");
   }
   const PHOTO_PROMPT =
@@ -824,7 +879,7 @@
             const l = aiItem(Object.assign({}, d, { name: it.name, brand: it.brand, product: it.product, packaged: true, portion: d.serving ? "1 serving: " + d.serving : it.portion }));
             Object.assign(it, l, { label: true });
           }
-        } catch (e) { if (e.limit) throw e; /* keep the photo estimate */ }
+        } catch (e) { /* label check failed: keep the photo estimate */ }
       }));
     }
     return items;
