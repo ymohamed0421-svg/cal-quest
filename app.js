@@ -1198,7 +1198,7 @@
       "<li>Search and add <code>Calculate Statistics</code>. Set it to <b>Sum</b>.</li>" +
       "<li>Search and add <code>Round Number</code>.</li>" +
       "<li>Search and add <code>Copy to Clipboard</code>.</li>" +
-      "<li>Tap the name at the top, call it <code>Copy Steps</code>, tap <b>Done</b>. The first time it runs, tap <b>Allow</b> for Health.</li></ol><p class=\"note\">If you have 0 steps so far today (like just after midnight), the shortcut copies nothing. That's normal.</p>" +
+      "<li>Tap the name at the top, call it <code>Copy Steps</code>, tap <b>Done</b>. The first time it runs, tap <b>Allow</b> for Health.</li><li>If it says it\'s \"trying to share Health items\", go to <b>Settings → Apps → Shortcuts → Advanced</b> and turn on <b>Allow Sharing Large Amounts of Data</b>.</li></ol><p class=\"note\">If you have 0 steps so far today (like just after midnight), the shortcut copies nothing. That's normal.</p>" +
       "<p><b>Every day:</b> run <b>Copy Steps</b> (tip: add it as a widget), open Cal Quest, tap <b>Steps</b> → <b>Paste from Health</b>.</p></div></details>" +
 
       '<details class="guide"><summary>📲 Install on iPhone & share</summary><div class="gb"><ol>' +
