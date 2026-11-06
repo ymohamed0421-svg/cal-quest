@@ -15,7 +15,7 @@ const base = SUPABASE_URL.replace(/\/$/, "") + "/rest/v1/push_subs";
 const headers = { apikey: SUPABASE_SECRET_KEY, "Content-Type": "application/json" };
 if (!SUPABASE_SECRET_KEY.startsWith("sb_")) headers.Authorization = "Bearer " + SUPABASE_SECRET_KEY; // legacy service_role JWT
 
-const WINDOW_MIN = 45; // send if a reminder time passed within the last 45 minutes (GitHub cron can run late)
+const WINDOW_MIN = 120; // send if a reminder time passed within the last 2 hours (GitHub cron can run late)
 const toMin = (hm) => { const [h, m] = hm.split(":").map(Number); return h * 60 + m; };
 function localNow(tz) {
   const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" })
