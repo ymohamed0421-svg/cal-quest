@@ -524,17 +524,18 @@
     const res = await withTimeout(url, 10000);
     if (!res.ok) throw new Error("OFF " + res.status);
     const js = await res.json();
-    return (js.products || []).map((p) => {
-      const n = p.nutriments || {};
-      const g = (k) => (n[k + "_100g"] != null ? Number(n[k + "_100g"]) : null);
-      let kcal = g("energy-kcal");
-      if (kcal == null && g("energy") != null) kcal = g("energy") / 4.184;
-      if (kcal == null || !p.product_name) return null;
-      const mg = (k) => (g(k) != null ? g(k) * 1000 : 0); // OFF stores minerals in grams
-      const per100 = { kcal, p: g("proteins") || 0, c: g("carbohydrates") || 0, f: g("fat") || 0, fiber: g("fiber") || 0, sugar: g("sugars") || 0, sat: g("saturated-fat") || 0, sodium: mg("sodium"), potassium: mg("potassium"), calcium: mg("calcium"), iron: mg("iron"), vitc: mg("vitamin-c") };
-      const sq = Number(p.serving_quantity);
-      return { name: p.product_name, brand: (p.brands || "").split(",")[0], src: "BRAND", per100, servingG: sq > 0 ? sq : 100, servingLabel: sq > 0 ? (p.serving_size || r0(sq) + " g") : "100 g" };
-    }).filter(Boolean);
+    return (js.products || []).map(offToFood).filter(Boolean);
+  }
+  function offToFood(p) {
+    const n = p.nutriments || {};
+    const g = (k) => (n[k + "_100g"] != null ? Number(n[k + "_100g"]) : null);
+    let kcal = g("energy-kcal");
+    if (kcal == null && g("energy") != null) kcal = g("energy") / 4.184;
+    if (kcal == null || !p.product_name) return null;
+    const mg = (k) => (g(k) != null ? g(k) * 1000 : 0); // OFF stores minerals in grams
+    const per100 = { kcal, p: g("proteins") || 0, c: g("carbohydrates") || 0, f: g("fat") || 0, fiber: g("fiber") || 0, sugar: g("sugars") || 0, sat: g("saturated-fat") || 0, sodium: mg("sodium"), potassium: mg("potassium"), calcium: mg("calcium"), iron: mg("iron"), vitc: mg("vitamin-c") };
+    const sq = Number(p.serving_quantity);
+    return { name: p.product_name, brand: (p.brands || "").split(",")[0], src: "BRAND", per100, servingG: sq > 0 ? sq : 100, servingLabel: sq > 0 ? (p.serving_size || r0(sq) + " g") : "100 g" };
   }
   function titleCase(s) { return s.length > 3 && s === s.toUpperCase() ? s.charAt(0) + s.slice(1).toLowerCase() : s; }
 
@@ -578,8 +579,23 @@
         return;
       }
       body.innerHTML =
+        '<label class="btn block" style="display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:10px">▦ Scan a barcode' +
+        '<input type="file" id="bc-file" accept="image/*" capture="environment" class="hidden"></label>' +
         '<input id="af-q" type="search" placeholder="Search: chicken, banana, Chobani…" autocomplete="off" enterkeyhint="search">' +
         '<div class="results" id="af-res"></div>';
+      $("#bc-file", body).addEventListener("change", async (e) => {
+        const file = e.target.files && e.target.files[0]; if (!file) return;
+        const box = $("#af-res", body);
+        box.innerHTML = '<div class="loading">Reading barcode</div>';
+        try {
+          const code = await readBarcode(file);
+          box.innerHTML = '<div class="loading">Looking up ' + esc(code) + '</div>';
+          const food = await lookupBarcode(code);
+          if (food) openAmount(food);
+          else box.innerHTML = '<div class="empty">Barcode ' + esc(code) + " isn't in the free food database yet. Try 📷 Photo (snap the Nutrition Facts label) or Quick add.</div>";
+        } catch (err) { box.innerHTML = '<div class="err" style="text-align:left">' + esc(err.message || "Something went wrong") + "</div>"; }
+        e.target.value = "";
+      });
       const qIn = $("#af-q", body);
       showList("");
       let timer;
@@ -649,7 +665,7 @@
         try {
           const { b64, url } = await shrinkImage(file);
           out.innerHTML = '<img src="' + url + '" alt="" style="width:100%;max-height:220px;object-fit:cover;margin-top:14px;border:1px solid var(--line-dim)"><div class="loading">Scanning your food</div>';
-          const items = await analyzePhoto(b64, $("#ph-hint", body).value.trim());
+          const items = await analyzePhoto(b64, $("#ph-hint", body).value.trim(), (msg) => { const l = $(".loading", out); if (l) l.textContent = msg; });
           showPhotoItems(items, url);
         } catch (err) {
           out.innerHTML = '<div class="err" style="text-align:left">' + esc(err.message || "Something went wrong") + "</div>";
@@ -661,9 +677,10 @@
       if (!items.length) { out.innerHTML = '<div class="err">No food found in that photo. Try again closer up.</div>'; return; }
       const numIn = (cls, v, lab) => '<div><label class="f" style="margin:6px 0 4px">' + lab + '</label><input class="' + cls + '" type="number" inputmode="decimal" min="0" value="' + r0(v) + '"></div>';
       out.innerHTML = '<img src="' + url + '" alt="" style="width:100%;max-height:200px;object-fit:cover;margin-top:14px;border:1px solid var(--line-dim)">' +
-        '<p class="explain">AI guess. Fix anything that looks off, then add.</p>' +
+        '<p class="explain">AI guess. Fix anything that looks off, then add. Packaged food? <b>▦ Scan a barcode</b> in Search is the most accurate.</p>' +
         items.map((it, i) => '<div class="res" data-pi="' + i + '" style="cursor:default"><div style="display:flex;gap:8px;align-items:center"><input class="pi-name" value="' + esc(it.name) + '" style="flex:1;padding:8px">' +
-          '<button class="x pi-del" aria-label="Remove">×</button></div><span>' + esc(it.portion || "") + '</span>' +
+          '<button class="x pi-del" aria-label="Remove">×</button></div><span>' + esc(it.portion || "") +
+          (it.label ? ' · <b style="color:var(--good);display:inline;font-size:12px">✓ official label values</b>' : it.packaged ? ' · <b style="color:var(--warn);display:inline;font-size:12px">estimate, check the label</b>' : "") + '</span>' +
           '<div class="row">' + numIn("pi-k", it.kcal, "kcal") + numIn("pi-p", it.p, "prot g") + numIn("pi-c", it.c, "carb g") + numIn("pi-f", it.f, "fat g") + "</div></div>").join("") +
         mealSelect("ph-meal") + '<button class="btn good block" style="margin-top:14px" id="ph-add">Add to log</button>';
       $$(".pi-del", out).forEach((b) => b.addEventListener("click", () => b.closest(".res").remove()));
@@ -674,7 +691,7 @@
         rows.forEach((row) => {
           const it = items[+row.dataset.pi], g = (c) => Math.max(0, parseFloat($(c, row).value) || 0);
           const n = { kcal: g(".pi-k"), p: g(".pi-p"), c: g(".pi-c"), f: g(".pi-f"), fiber: it.fiber || 0, sugar: it.sugar || 0, sat: it.sat || 0, sodium: it.sodium || 0, potassium: 0, calcium: 0, iron: 0, vitc: 0 };
-          logFood(k, { name: ($(".pi-name", row).value.trim() || it.name) + " 📷", amountLabel: it.portion || "1 portion", meal: meal1, n });
+          logFood(k, { name: ($(".pi-name", row).value.trim() || it.name) + (it.label ? "" : " 📷"), amountLabel: it.portion || "1 portion", meal: meal1, n });
         });
         closeModal();
       });
@@ -740,18 +757,14 @@
       img.src = url;
     });
   }
-  const PHOTO_PROMPT =
-    "You are a nutrition expert. Identify every distinct food and drink in this photo and estimate the portion actually shown. " +
-    "Return JSON only, in this shape: {\"items\":[{\"name\":string,\"portion\":string,\"grams\":number,\"kcal\":number,\"protein_g\":number,\"carbs_g\":number,\"fat_g\":number,\"fiber_g\":number,\"sugar_g\":number,\"sat_fat_g\":number,\"sodium_mg\":number}]}. " +
-    "Use short everyday names (e.g. \"Grilled chicken breast\"), and a portion in everyday words plus grams (e.g. \"about 1 cup (160 g)\"). " +
-    "Account for visible oils, sauces and cooking method. If there is no food, return {\"items\":[]}.";
-  async function analyzePhoto(b64, hint) {
+  // One call to Google's Gemini. opts.json → ask for JSON output; opts.search → let it use Google Search.
+  async function gemini(parts, opts = {}) {
     const key = S.settings.geminiKey;
     const models = [S.settings.geminiModel || "gemini-flash-latest", "gemini-2.5-flash"];
-    const body = JSON.stringify({
-      contents: [{ parts: [{ inline_data: { mime_type: "image/jpeg", data: b64 } }, { text: PHOTO_PROMPT + (hint ? " Extra info from the user: " + hint : "") }] }],
-      generationConfig: { responseMimeType: "application/json", temperature: 0.2 },
-    });
+    const req = { contents: [{ parts }], generationConfig: { temperature: 0.2 } };
+    if (opts.json) req.generationConfig.responseMimeType = "application/json";
+    if (opts.search) req.tools = [{ google_search: {} }];
+    const body = JSON.stringify(req);
     let lastErr;
     for (const model of models) {
       let res;
@@ -764,23 +777,106 @@
       if (res.status === 404) { lastErr = new Error("AI model not available"); continue; }
       if (res.status === 400 || res.status === 401 || res.status === 403) {
         const txt = await res.text().catch(() => "");
-        if (/API key|API_KEY|PERMISSION/i.test(txt)) { S.settings.geminiKey = ""; save(); throw new Error("Google says that key doesn't work. Close this, tap 📷 Photo again and paste a new key."); }
-        throw new Error("The AI couldn't read that photo. Try another one.");
+        if (/API key|API_KEY|PERMISSION|UNAUTHENTICATED/i.test(txt)) { S.settings.geminiKey = ""; save(); throw new Error("Google says that key doesn't work. Close this, tap 📷 Photo again and paste a new key."); }
+        const e = new Error("The AI couldn't read that photo. Try another one."); e.bad = true; throw e;
       }
-      if (res.status === 429) throw new Error("You hit the free AI limit for now. Wait a minute and try again, or log it with Search.");
+      if (res.status === 429) { const e = new Error("You hit the free AI limit for now. Wait a minute and try again, or log it with Search."); e.limit = true; throw e; }
       if (!res.ok) throw new Error("The AI is busy (" + res.status + "). Try again in a moment.");
       const js = await res.json();
-      const text = (((js.candidates || [])[0] || {}).content || {}).parts ? js.candidates[0].content.parts.map((p) => p.text || "").join("") : "";
-      let data;
-      try { data = JSON.parse(text.replace(/^```(?:json)?\s*|\s*```$/g, "")); } catch (e) { throw new Error("The AI gave a confusing answer. Try again."); }
-      const arr = Array.isArray(data) ? data : data.items || [];
-      return arr.filter((x) => x && x.name).slice(0, 12).map((x) => ({
-        name: String(x.name).slice(0, 80), portion: String(x.portion || "").slice(0, 80),
-        kcal: +x.kcal || 0, p: +x.protein_g || 0, c: +x.carbs_g || 0, f: +x.fat_g || 0,
-        fiber: +x.fiber_g || 0, sugar: +x.sugar_g || 0, sat: +x.sat_fat_g || 0, sodium: +x.sodium_mg || 0,
-      }));
+      const cand = (js.candidates || [])[0] || {};
+      const text = ((cand.content || {}).parts || []).map((p) => p.text || "").join("");
+      // pull the JSON out even if it's wrapped in ``` fences or extra words
+      const m = text.match(/[\[{][\s\S]*[\]}]/);
+      try { return JSON.parse(m ? m[0] : text); } catch (e) { throw new Error("The AI gave a confusing answer. Try again."); }
     }
     throw lastErr || new Error("The AI isn't available right now.");
+  }
+  const PHOTO_PROMPT =
+    "You are a nutrition expert. Identify every distinct food and drink in this photo. " +
+    "If an item is a PACKAGED or BRANDED product (a wrapper, box, can or logo is visible), set packaged=true, fill brand and product, " +
+    "and give the manufacturer's official nutrition facts for ONE package/serving as sold, using the real net weight from the package, not a visual guess. " +
+    "If a nutrition facts label is visible, copy its numbers exactly. Otherwise estimate the portion actually shown, accounting for visible oils, sauces and cooking method. " +
+    "Return JSON only: {\"items\":[{\"name\":string,\"brand\":string,\"product\":string,\"packaged\":boolean,\"portion\":string,\"grams\":number,\"kcal\":number,\"protein_g\":number,\"carbs_g\":number,\"fat_g\":number,\"fiber_g\":number,\"sugar_g\":number,\"sat_fat_g\":number,\"sodium_mg\":number}]}. " +
+    "Use short everyday names and a portion in everyday words plus grams (e.g. \"1 bar (45 g)\"). If there is no food, return {\"items\":[]}.";
+  function aiItem(x) {
+    return {
+      name: String(x.name || x.product || "Food").slice(0, 80), portion: String(x.portion || x.serving || "").slice(0, 80),
+      brand: String(x.brand || "").slice(0, 60), product: String(x.product || "").slice(0, 80), packaged: !!x.packaged,
+      kcal: +x.kcal || 0, p: +x.protein_g || 0, c: +x.carbs_g || 0, f: +x.fat_g || 0,
+      fiber: +x.fiber_g || 0, sugar: +x.sugar_g || 0, sat: +x.sat_fat_g || 0, sodium: +x.sodium_mg || 0,
+    };
+  }
+  async function analyzePhoto(b64, hint, onStatus) {
+    const data = await gemini([{ inline_data: { mime_type: "image/jpeg", data: b64 } }, { text: PHOTO_PROMPT + (hint ? " Extra info from the user: " + hint : "") }], { json: true });
+    const items = (Array.isArray(data) ? data : data.items || []).filter((x) => x && (x.name || x.product)).slice(0, 12).map(aiItem);
+    // For packaged foods, double-check against the real label using Google Search.
+    const packaged = items.filter((it) => it.packaged && (it.brand || it.product));
+    if (packaged.length) {
+      if (onStatus) onStatus("Checking the official label");
+      await Promise.all(packaged.slice(0, 3).map(async (it) => {
+        try {
+          const what = (it.brand + " " + (it.product || it.name)).trim();
+          const d = await gemini([{ text:
+            "Search the web for the official Nutrition Facts of \"" + what + "\" (from the brand's site, the package, or a grocery retailer). " +
+            "Return JSON only for ONE serving as listed on the label: {\"found\":boolean,\"serving\":string,\"grams\":number,\"kcal\":number,\"protein_g\":number,\"carbs_g\":number,\"fat_g\":number,\"fiber_g\":number,\"sugar_g\":number,\"sat_fat_g\":number,\"sodium_mg\":number}. " +
+            "If you can't find reliable label data, return {\"found\":false}." }], { search: true });
+          if (d && d.found && +d.kcal > 0) {
+            const l = aiItem(Object.assign({}, d, { name: it.name, brand: it.brand, product: it.product, packaged: true, portion: d.serving ? "1 serving: " + d.serving : it.portion }));
+            Object.assign(it, l, { label: true });
+          }
+        } catch (e) { if (e.limit) throw e; /* keep the photo estimate */ }
+      }));
+    }
+    return items;
+  }
+
+  // ---- barcode → Open Food Facts
+  let zxingLoad;
+  function loadZXing() {
+    if (window.ZXing) return Promise.resolve();
+    zxingLoad = zxingLoad || new Promise((ok, bad) => {
+      const s = document.createElement("script"); s.src = "vendor/zxing-0.21.3.min.js";
+      s.onload = ok; s.onerror = () => { zxingLoad = null; bad(new Error("Couldn't load the barcode scanner. Check your internet.")); };
+      document.head.appendChild(s);
+    });
+    return zxingLoad;
+  }
+  async function readBarcode(file) {
+    await loadZXing();
+    const Z = window.ZXing;
+    const hints = new Map();
+    hints.set(Z.DecodeHintType.POSSIBLE_FORMATS, [Z.BarcodeFormat.EAN_13, Z.BarcodeFormat.EAN_8, Z.BarcodeFormat.UPC_A, Z.BarcodeFormat.UPC_E]);
+    hints.set(Z.DecodeHintType.TRY_HARDER, true);
+    const reader = new Z.MultiFormatReader(); reader.setHints(hints);
+    const img = await new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => bad(new Error("Couldn't open that photo.")); i.src = URL.createObjectURL(file); });
+    // try a few sizes and both orientations — phone photos are big and barcodes can be sideways
+    for (const max of [1200, 800, 1800]) {
+      for (const rot of [0, 90]) {
+        const s = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+        const w = Math.round(img.naturalWidth * s), h = Math.round(img.naturalHeight * s);
+        const c = document.createElement("canvas"); const ctx = c.getContext("2d");
+        if (rot) { c.width = h; c.height = w; ctx.translate(h, 0); ctx.rotate(Math.PI / 2); } else { c.width = w; c.height = h; }
+        ctx.drawImage(img, 0, 0, w, h);
+        try {
+          const lum = new Z.HTMLCanvasElementLuminanceSource(c);
+          const res = reader.decode(new Z.BinaryBitmap(new Z.HybridBinarizer(lum)));
+          URL.revokeObjectURL(img.src);
+          return res.getText();
+        } catch (e) { /* try next */ }
+      }
+    }
+    URL.revokeObjectURL(img.src);
+    throw new Error("Couldn't find a barcode. Get closer, keep it flat and in focus, and try again.");
+  }
+  async function lookupBarcode(code) {
+    const tries = [code]; if (code.length === 12) tries.push("0" + code); if (code.length === 13 && code[0] === "0") tries.push(code.slice(1));
+    for (const c of tries) {
+      const res = await withTimeout("https://world.openfoodfacts.org/api/v2/product/" + encodeURIComponent(c) + ".json?fields=code,product_name,brands,nutriments,serving_size,serving_quantity", 10000);
+      if (!res.ok) continue;
+      const js = await res.json();
+      if (js.status === 1 && js.product) { const f = offToFood(js.product); if (f) return f; }
+    }
+    return null;
   }
 
   function scaleNutrients(per100, g) {

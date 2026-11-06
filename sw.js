@@ -1,6 +1,6 @@
 // Offline support: keep the app's own files cached; food search always goes to the network.
-const CACHE = "calquest-v1";
-const SHELL = ["./", "index.html", "styles.css", "app.js", "foods.js", "manifest.webmanifest", "icons/icon-192.png", "icons/apple-touch-icon.png"];
+const CACHE = "calquest-v2";
+const SHELL = ["./", "index.html", "styles.css", "app.js", "foods.js", "manifest.webmanifest", "icons/icon-192.png", "icons/apple-touch-icon.png", "vendor/zxing-0.21.3.min.js"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
