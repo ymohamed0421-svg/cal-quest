@@ -14,7 +14,7 @@
       targets: null,
       days: {},
       recents: [],
-      settings: { reminders: DEFAULT_REMINDERS.slice(), usdaKey: "" },
+      settings: { reminders: DEFAULT_REMINDERS.slice(), usdaKey: "", geminiKey: "" },
       celebrated: {},
       lastLevel: 1,
     };
@@ -544,7 +544,7 @@
     let searchSeq = 0;
     const bg = openModal(
       '<h2 class="panel-title" style="font-size:24px">Log Food</h2>' +
-      '<div class="tabs" style="margin-top:12px"><button data-mode="search" class="active">Search</button><button data-mode="quick">Quick add</button></div>' +
+      '<div class="tabs" style="margin-top:12px"><button data-mode="search" class="active">Search</button><button data-mode="photo">📷 Photo</button><button data-mode="quick">Quick add</button></div>' +
       '<div id="af-body"></div>');
     const body = $("#af-body", bg);
     $$(".tabs button", bg).forEach((b) => b.addEventListener("click", () => {
@@ -554,6 +554,7 @@
       return '<label class="f" for="' + id + '">Meal</label><select id="' + id + '">' + MEALS.map(([m, n]) => '<option value="' + m + '"' + (m === meal ? " selected" : "") + ">" + n + "</option>").join("") + "</select>";
     }
     function draw() {
+      if (mode === "photo") return drawPhoto();
       if (mode === "quick") {
         body.innerHTML =
           '<label class="f" for="qa-name">Name</label><input id="qa-name" placeholder="e.g. Mom\'s lasagna">' +
@@ -615,6 +616,69 @@
         bindRes(box);
       });
     }
+    // ---- photo → AI estimate
+    function drawPhoto() {
+      if (!S.settings.geminiKey) {
+        body.innerHTML =
+          '<p class="explain" style="margin-top:0">Snap your plate and an AI guesses the foods and calories. It needs a free key from Google, one time only:</p>' +
+          '<ol class="explain" style="padding-left:20px">' +
+          '<li>Open <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" style="color:var(--line)">aistudio.google.com/apikey</a> and sign in with any Google account.</li>' +
+          "<li>Tap <b>Create API key</b>. If it asks, accept the terms and pick or create any project.</li>" +
+          "<li>Tap <b>copy</b> next to the key. It starts with <b>AIza</b>.</li>" +
+          "<li>Come back here, paste it below, tap Save.</li></ol>" +
+          '<label class="f" for="gk">Your Google AI key</label><input id="gk" placeholder="AIza…" autocomplete="off" autocapitalize="off" spellcheck="false">' +
+          '<button class="btn primary block" style="margin-top:12px" id="gk-save">Save key</button>' +
+          '<p class="note">The key is saved only on this phone. Don\'t share it. It\'s free for personal use; Google may use free-tier photos to improve its AI.</p>';
+        $("#gk-save", body).addEventListener("click", () => {
+          const v = $("#gk", body).value.trim();
+          if (!/^AIza[\w-]{20,}$/.test(v)) { toast("That doesn't look like a Google AI key", "It should start with AIza"); return; }
+          S.settings.geminiKey = v; save(); drawPhoto();
+        });
+        return;
+      }
+      body.innerHTML =
+        '<label class="btn primary block" style="display:flex;align-items:center;justify-content:center;gap:8px;min-height:64px">📷 Take or choose a photo' +
+        '<input type="file" id="ph-file" accept="image/*" capture="environment" class="hidden"></label>' +
+        '<label class="f" for="ph-hint">Anything the photo can\'t show? (optional)</label><input id="ph-hint" placeholder="e.g. cooked in butter, large portion">' +
+        '<div id="ph-out"></div>';
+      $("#ph-file", body).addEventListener("change", async (e) => {
+        const file = e.target.files && e.target.files[0]; if (!file) return;
+        const out = $("#ph-out", body);
+        out.innerHTML = '<div class="loading" style="margin-top:14px">Scanning your food</div>';
+        try {
+          const { b64, url } = await shrinkImage(file);
+          out.innerHTML = '<img src="' + url + '" alt="" style="width:100%;max-height:220px;object-fit:cover;margin-top:14px;border:1px solid var(--line-dim)"><div class="loading">Scanning your food</div>';
+          const items = await analyzePhoto(b64, $("#ph-hint", body).value.trim());
+          showPhotoItems(items, url);
+        } catch (err) {
+          out.innerHTML = '<div class="err" style="text-align:left">' + esc(err.message || "Something went wrong") + "</div>";
+        }
+      });
+    }
+    function showPhotoItems(items, url) {
+      const out = $("#ph-out", body);
+      if (!items.length) { out.innerHTML = '<div class="err">No food found in that photo. Try again closer up.</div>'; return; }
+      const numIn = (cls, v, lab) => '<div><label class="f" style="margin:6px 0 4px">' + lab + '</label><input class="' + cls + '" type="number" inputmode="decimal" min="0" value="' + r0(v) + '"></div>';
+      out.innerHTML = '<img src="' + url + '" alt="" style="width:100%;max-height:200px;object-fit:cover;margin-top:14px;border:1px solid var(--line-dim)">' +
+        '<p class="explain">AI guess. Fix anything that looks off, then add.</p>' +
+        items.map((it, i) => '<div class="res" data-pi="' + i + '" style="cursor:default"><div style="display:flex;gap:8px;align-items:center"><input class="pi-name" value="' + esc(it.name) + '" style="flex:1;padding:8px">' +
+          '<button class="x pi-del" aria-label="Remove">×</button></div><span>' + esc(it.portion || "") + '</span>' +
+          '<div class="row">' + numIn("pi-k", it.kcal, "kcal") + numIn("pi-p", it.p, "prot g") + numIn("pi-c", it.c, "carb g") + numIn("pi-f", it.f, "fat g") + "</div></div>").join("") +
+        mealSelect("ph-meal") + '<button class="btn good block" style="margin-top:14px" id="ph-add">Add to log</button>';
+      $$(".pi-del", out).forEach((b) => b.addEventListener("click", () => b.closest(".res").remove()));
+      $("#ph-add", out).addEventListener("click", () => {
+        const rows = $$(".res[data-pi]", out);
+        if (!rows.length) { toast("Nothing to add"); return; }
+        const meal1 = $("#ph-meal", out).value;
+        rows.forEach((row) => {
+          const it = items[+row.dataset.pi], g = (c) => Math.max(0, parseFloat($(c, row).value) || 0);
+          const n = { kcal: g(".pi-k"), p: g(".pi-p"), c: g(".pi-c"), f: g(".pi-f"), fiber: it.fiber || 0, sugar: it.sugar || 0, sat: it.sat || 0, sodium: it.sodium || 0, potassium: 0, calcium: 0, iron: 0, vitc: 0 };
+          logFood(k, { name: ($(".pi-name", row).value.trim() || it.name) + " 📷", amountLabel: it.portion || "1 portion", meal: meal1, n });
+        });
+        closeModal();
+      });
+    }
+
     function resHTML(f, i) {
       const per = scaleNutrients(f.per100, f.servingG);
       return '<button class="res" data-i="' + i + '"><span class="src">' + esc(f.src) + "</span><b>" + esc(f.name) + "</b><span>" +
@@ -657,6 +721,67 @@
     }
     draw();
   }
+  // Resize a photo to ≤1024 px JPEG so it uploads fast.
+  function shrinkImage(file) {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        const max = 1024, s = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+        const c = document.createElement("canvas");
+        c.width = Math.round(img.naturalWidth * s); c.height = Math.round(img.naturalHeight * s);
+        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+        const data = c.toDataURL("image/jpeg", 0.82);
+        resolve({ b64: data.split(",")[1], url: data });
+        URL.revokeObjectURL(url);
+      };
+      img.onerror = () => reject(new Error("Couldn't open that photo. Try another one."));
+      img.src = url;
+    });
+  }
+  const PHOTO_PROMPT =
+    "You are a nutrition expert. Identify every distinct food and drink in this photo and estimate the portion actually shown. " +
+    "Return JSON only, in this shape: {\"items\":[{\"name\":string,\"portion\":string,\"grams\":number,\"kcal\":number,\"protein_g\":number,\"carbs_g\":number,\"fat_g\":number,\"fiber_g\":number,\"sugar_g\":number,\"sat_fat_g\":number,\"sodium_mg\":number}]}. " +
+    "Use short everyday names (e.g. \"Grilled chicken breast\"), and a portion in everyday words plus grams (e.g. \"about 1 cup (160 g)\"). " +
+    "Account for visible oils, sauces and cooking method. If there is no food, return {\"items\":[]}.";
+  async function analyzePhoto(b64, hint) {
+    const key = S.settings.geminiKey;
+    const models = [S.settings.geminiModel || "gemini-flash-latest", "gemini-2.5-flash"];
+    const body = JSON.stringify({
+      contents: [{ parts: [{ inline_data: { mime_type: "image/jpeg", data: b64 } }, { text: PHOTO_PROMPT + (hint ? " Extra info from the user: " + hint : "") }] }],
+      generationConfig: { responseMimeType: "application/json", temperature: 0.2 },
+    });
+    let lastErr;
+    for (const model of models) {
+      let res;
+      try {
+        const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 45000);
+        res = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent", {
+          method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": key }, body, signal: ctl.signal,
+        }).finally(() => clearTimeout(t));
+      } catch (e) { throw new Error("Couldn't reach the AI. Check your internet and try again."); }
+      if (res.status === 404) { lastErr = new Error("AI model not available"); continue; }
+      if (res.status === 400 || res.status === 401 || res.status === 403) {
+        const txt = await res.text().catch(() => "");
+        if (/API key|API_KEY|PERMISSION/i.test(txt)) { S.settings.geminiKey = ""; save(); throw new Error("Google says that key doesn't work. Close this, tap 📷 Photo again and paste a new key."); }
+        throw new Error("The AI couldn't read that photo. Try another one.");
+      }
+      if (res.status === 429) throw new Error("You hit the free AI limit for now. Wait a minute and try again, or log it with Search.");
+      if (!res.ok) throw new Error("The AI is busy (" + res.status + "). Try again in a moment.");
+      const js = await res.json();
+      const text = (((js.candidates || [])[0] || {}).content || {}).parts ? js.candidates[0].content.parts.map((p) => p.text || "").join("") : "";
+      let data;
+      try { data = JSON.parse(text.replace(/^```(?:json)?\s*|\s*```$/g, "")); } catch (e) { throw new Error("The AI gave a confusing answer. Try again."); }
+      const arr = Array.isArray(data) ? data : data.items || [];
+      return arr.filter((x) => x && x.name).slice(0, 12).map((x) => ({
+        name: String(x.name).slice(0, 80), portion: String(x.portion || "").slice(0, 80),
+        kcal: +x.kcal || 0, p: +x.protein_g || 0, c: +x.carbs_g || 0, f: +x.fat_g || 0,
+        fiber: +x.fiber_g || 0, sugar: +x.sugar_g || 0, sat: +x.sat_fat_g || 0, sodium: +x.sodium_mg || 0,
+      }));
+    }
+    throw lastErr || new Error("The AI isn't available right now.");
+  }
+
   function scaleNutrients(per100, g) {
     const n = {}; NKEYS.forEach((k) => (n[k] = ((Number(per100[k]) || 0) * g) / 100)); return n;
   }
@@ -728,6 +853,8 @@
       '<details class="guide"><summary>⚙️ Advanced</summary><div class="gb">' +
       '<label class="f" for="pl-usda">USDA API key (optional)</label><input id="pl-usda" placeholder="Leave blank to use the shared demo key" value="' + esc(S.settings.usdaKey) + '">' +
       '<p class="note">Online search uses a shared demo key with a small hourly limit. A free personal key from api.data.gov removes the limit.</p>' +
+      '<div class="kv"><span>Photo AI key</span><b>' + (S.settings.geminiKey ? "saved ✓" : "not set") + "</b></div>" +
+      (S.settings.geminiKey ? '<button class="btn sm block" id="pl-gk" style="margin-top:8px">Remove photo AI key</button>' : "") +
       '<button class="btn danger block" id="pl-reset" style="margin-top:14px">Erase everything</button></div></details>' +
       '<p class="note">Cal Quest gives general estimates, not medical advice. Talk to a doctor before big diet changes.</p>';
 
@@ -748,6 +875,7 @@
     $("#pl-import").addEventListener("click", () => $("#pl-file").click());
     $("#pl-file").addEventListener("change", importData);
     $("#pl-usda").addEventListener("change", (e) => { S.settings.usdaKey = e.target.value.trim(); save(); toast("Saved"); });
+    if ($("#pl-gk")) $("#pl-gk").addEventListener("click", () => { S.settings.geminiKey = ""; save(); render(); toast("Photo AI key removed"); });
     $("#pl-reset").addEventListener("click", () => {
       if (confirm("Erase all your data on this phone? This can't be undone.")) { localStorage.removeItem(STORE_KEY); S = fresh(); tab = "quest"; render(); }
     });
